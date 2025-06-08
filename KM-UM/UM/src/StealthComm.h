@@ -75,7 +75,7 @@ struct CommunicationSlot {
 
     // Added for ChaCha20 + Poly1305
     uint8_t nonce[12]; // ChaCha20 Nonce/IV
-    uint8_t mac[16];   // Poly1305 MAC
+    uint8_t mac_tag[16];   // Poly1305 MAC Tag (renamed from mac)
 };
 
 struct SharedCommBlock {
@@ -151,7 +151,7 @@ struct PtrStruct1_UM {
 extern SharedCommBlock* g_shared_comm_block;
 extern std::atomic<uint32_t> g_next_request_id;
 
-bool InitializeStealthComm();
+NTSTATUS InitializeStealthComm(); // Changed return type from bool to NTSTATUS
 void ShutdownStealthComm(); // Added for proper deallocation
 
 bool SubmitRequestAndWait(

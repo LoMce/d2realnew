@@ -61,4 +61,5 @@ namespace DriverComm {
     // Retain old free_memory for compatibility
     bool free_memory(uintptr_t address, SIZE_T size);
 
+    NTSTATUS RequestDriverUnload(); // New function to request driver unload
 }

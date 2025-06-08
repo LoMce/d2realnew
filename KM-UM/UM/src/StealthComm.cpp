@@ -2,12 +2,13 @@
 #include <Windows.h>
 #include <bcrypt.h> // For BCryptGenRandom
 // Note: Link against bcrypt.lib for BCryptGenRandom
-#include <iostream>
+// #include <iostream> // Replaced by Logging.h
 #include <vector>
 #include <cstring>
 // #include <random> // Replaced by GetTickCount64 and simple LCG for nonce
-#include <iomanip> // For std::hex, std::setw, std::setfill
+// #include <iomanip> // For std::hex, std::setw, std::setfill - Logging should handle formatting
 #include <atomic>  // For g_next_request_id
+#include "Logging.h" // Assuming Logging.h is accessible
 
 // Define global variables within the StealthComm namespace
 namespace StealthComm {
@@ -32,7 +33,7 @@ namespace StealthComm {
 
         status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0);
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] StandardLib_ChaCha20_Encrypt_UM: BCryptOpenAlgorithmProvider failed 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Encrypt_UM: BCryptOpenAlgorithmProvider failed 0x%lX", status);
             if (buffer_ciphertext != buffer_plaintext && plaintext_size > 0) memcpy(buffer_ciphertext, buffer_plaintext, plaintext_size); // Copy plaintext to ciphertext on error if distinct buffers
             if (output_tag_16_bytes) memset(output_tag_16_bytes, 0, 16); // Zero out tag on error
             return;
@@ -40,7 +41,7 @@ namespace StealthComm {
 
         status = BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, key_bytes, 32, 0);
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] StandardLib_ChaCha20_Encrypt_UM: BCryptGenerateSymmetricKey failed 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Encrypt_UM: BCryptGenerateSymmetricKey failed 0x%lX", status);
             if (buffer_ciphertext != buffer_plaintext && plaintext_size > 0) memcpy(buffer_ciphertext, buffer_plaintext, plaintext_size);
             if (output_tag_16_bytes) memset(output_tag_16_bytes, 0, 16);
             goto Cleanup;
@@ -56,12 +57,12 @@ namespace StealthComm {
 
         status = BCryptEncrypt(hKey, buffer_plaintext, plaintext_size, &authInfo, NULL, 0, buffer_ciphertext, plaintext_size, &cbResult, 0);
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] StandardLib_ChaCha20_Encrypt_UM: BCryptEncrypt failed 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Encrypt_UM: BCryptEncrypt failed 0x%lX", status);
             if (buffer_ciphertext != buffer_plaintext && plaintext_size > 0) memcpy(buffer_ciphertext, buffer_plaintext, plaintext_size);
             // Tag is already written to by BCryptEncrypt or zeroed by pbTag, but good to be sure on error path
             if (output_tag_16_bytes) memset(output_tag_16_bytes, 0, 16);
         } else if (cbResult != plaintext_size) {
-            std::cerr << "[-] StandardLib_ChaCha20_Encrypt_UM: BCryptEncrypt cbResult mismatch. Expected " << plaintext_size << ", Got " << cbResult << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Encrypt_UM: BCryptEncrypt cbResult mismatch. Expected %u, Got %lu", plaintext_size, cbResult);
             // This case might indicate a more severe issue. Consider how to handle.
             // For safety, ensure ciphertext is not partially written or misleading.
             if (buffer_ciphertext != buffer_plaintext && plaintext_size > 0) memcpy(buffer_ciphertext, buffer_plaintext, plaintext_size); // Or zero out ciphertext
@@ -83,14 +84,14 @@ namespace StealthComm {
 
         status = BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_CHACHA20_POLY1305_ALGORITHM, MS_PRIMITIVE_PROVIDER, 0);
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] StandardLib_ChaCha20_Decrypt_UM: BCryptOpenAlgorithmProvider failed 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Decrypt_UM: BCryptOpenAlgorithmProvider failed 0x%lX", status);
             if (buffer_plaintext != buffer_ciphertext && ciphertext_size > 0) memcpy(buffer_plaintext, buffer_ciphertext, ciphertext_size); // Copy ciphertext to plaintext on error
             return false;
         }
 
         status = BCryptGenerateSymmetricKey(hAlg, &hKey, NULL, 0, key_bytes, 32, 0);
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] StandardLib_ChaCha20_Decrypt_UM: BCryptGenerateSymmetricKey failed 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] StandardLib_ChaCha20_Decrypt_UM: BCryptGenerateSymmetricKey failed 0x%lX", status);
             if (buffer_plaintext != buffer_ciphertext && ciphertext_size > 0) memcpy(buffer_plaintext, buffer_ciphertext, ciphertext_size);
             goto CleanupFalse;
         }
@@ -106,14 +107,14 @@ namespace StealthComm {
         status = BCryptDecrypt(hKey, buffer_ciphertext, ciphertext_size, &authInfo, NULL, 0, buffer_plaintext, ciphertext_size, &cbResult, 0);
         if (!NT_SUCCESS(status)) {
             if (status == STATUS_AUTH_TAG_MISMATCH) { // 0xC000A002
-                std::cerr << "[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt failed - STATUS_AUTH_TAG_MISMATCH (Tag verification failed)" << std::endl;
+                LogMessage("[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt failed - STATUS_AUTH_TAG_MISMATCH (Tag verification failed)");
             } else {
-                std::cerr << "[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt failed 0x" << std::hex << status << std::dec << std::endl;
+                LogMessageF("[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt failed 0x%lX", status);
             }
             if (buffer_plaintext != buffer_ciphertext && ciphertext_size > 0) memcpy(buffer_plaintext, buffer_ciphertext, ciphertext_size); // Or zero out plaintext
             goto CleanupFalse;
         } else if (cbResult != ciphertext_size) {
-             std::cerr << "[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt cbResult mismatch. Expected " << ciphertext_size << ", Got " << cbResult << std::endl;
+             LogMessageF("[-] StandardLib_ChaCha20_Decrypt_UM: BCryptDecrypt cbResult mismatch. Expected %u, Got %lu", ciphertext_size, cbResult);
              if (buffer_plaintext != buffer_ciphertext && ciphertext_size > 0) memcpy(buffer_plaintext, buffer_ciphertext, ciphertext_size);
              goto CleanupFalse;
         }
@@ -168,7 +169,7 @@ namespace StealthComm {
 
         if (!NT_SUCCESS(status)) {
             // Fallback or error logging if BCryptGenRandom fails
-            std::cerr << "[-] GenerateNonce_UM: BCryptGenRandom failed with status 0x" << std::hex << status << std::dec << ". Zeroing nonce." << std::endl;
+            LogMessageF("[-] GenerateNonce_UM: BCryptGenRandom failed with status 0x%lX. Zeroing nonce.", status);
             memset(nonce_buffer, 0, size);
             // As a minimal fallback, XOR with request_id
             for (UINT32 i = 0; i < size; ++i) {
@@ -219,14 +220,18 @@ namespace StealthComm {
             } else {
                  actual_size_bytes = 0;
             }
-            std::cerr << "[!] Serialize_wstring: Warning - WString too long, truncated." << std::endl;
+            LogMessage("[!] Serialize_wstring: Warning - WString too long, truncated.");
             return;
         }
         memcpy(dest, str, actual_size_bytes);
     }
 
     // ... (InitializeStealthComm - UNCHANGED) ...
-    bool InitializeStealthComm() {
+    NTSTATUS InitializeStealthComm() {
+        if (g_shared_comm_block != nullptr) {
+            LogMessage("[-] InitializeStealthComm: Attempted to re-initialize while already active. Call ShutdownStealthComm first.");
+            return 0xC00000AA; // STATUS_ALREADY_INITIALIZED
+        }
         // std::random_device rd; // Not needed if mt19937_64 is seeded differently or not used for these specific globals
         // std::mt19937_64 gen(rd());
         // Using GetTickCount64 for seed to avoid potential issues with std::random_device availability/quality in some environments
@@ -256,17 +261,17 @@ namespace StealthComm {
         g_shared_comm_block = static_cast<SharedCommBlock*>(VirtualAlloc(
             nullptr, sizeof(SharedCommBlock), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE ));
         if (!g_shared_comm_block) {
-            std::cerr << "[-] InitializeStealthComm: Failed to allocate memory for SharedCommBlock." << std::endl;
-            return false;
+            LogMessage("[-] InitializeStealthComm: Failed to allocate memory for SharedCommBlock.");
+            return STATUS_NO_MEMORY; // Or a more specific error for VirtualAlloc failure
         }
 
         uint64_t sig_um = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature;
         uint32_t derived_index_xor_key_um_init = (uint32_t)(sig_um & 0xFFFFFFFF) ^ (uint32_t)(sig_um >> 32);
         if (g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature == 0) {
-            std::cerr << "[-] InitializeStealthComm: dynamic_shared_comm_block_signature is 0. Cannot derive index XOR key.\n";
+            LogMessage("[-] InitializeStealthComm: dynamic_shared_comm_block_signature is 0. Cannot derive index XOR key.");
             VirtualFree(g_shared_comm_block, 0, MEM_RELEASE);
             g_shared_comm_block = nullptr;
-            return false;
+            return STATUS_INVALID_PARAMETER; // Or a custom error
         }
 
         g_shared_comm_block->signature = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature;
@@ -281,22 +286,22 @@ namespace StealthComm {
         }
 
         g_ptr_struct4_um = static_cast<PtrStruct4_UM*>(VirtualAlloc(nullptr, sizeof(PtrStruct4_UM), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!g_ptr_struct4_um) { ShutdownStealthComm(); return false; }
+        if (!g_ptr_struct4_um) { ShutdownStealthComm(); return STATUS_NO_MEMORY; }
         g_ptr_struct4_um->data_block = g_shared_comm_block;
         g_ptr_struct4_um->obfuscation_value2 = 0;
 
         g_ptr_struct3_um = static_cast<PtrStruct3_UM*>(VirtualAlloc(nullptr, sizeof(PtrStruct3_UM), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!g_ptr_struct3_um) { ShutdownStealthComm(); return false; }
+        if (!g_ptr_struct3_um) { ShutdownStealthComm(); return STATUS_NO_MEMORY; }
         g_ptr_struct3_um->next_ptr_struct = g_ptr_struct4_um;
         g_ptr_struct3_um->obfuscation_value2 = 0;
 
         g_ptr_struct2_um = static_cast<PtrStruct2_UM*>(VirtualAlloc(nullptr, sizeof(PtrStruct2_UM), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!g_ptr_struct2_um) { ShutdownStealthComm(); return false; }
+        if (!g_ptr_struct2_um) { ShutdownStealthComm(); return STATUS_NO_MEMORY; }
         g_ptr_struct2_um->next_ptr_struct = g_ptr_struct3_um;
         g_ptr_struct2_um->obfuscation_value2 = 0;
 
         g_ptr_struct1_head_um = static_cast<PtrStruct1_UM*>(VirtualAlloc(nullptr, sizeof(PtrStruct1_UM), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-        if (!g_ptr_struct1_head_um) { ShutdownStealthComm(); return false; }
+        if (!g_ptr_struct1_head_um) { ShutdownStealthComm(); return STATUS_NO_MEMORY; }
         g_ptr_struct1_head_um->next_ptr_struct = g_ptr_struct2_um;
         g_ptr_struct1_head_um->head_signature = g_dynamic_signatures_relay_data.dynamic_head_signature;
 
@@ -309,18 +314,18 @@ namespace StealthComm {
             HANDSHAKE_DEVICE_SYMLINK_NAME_UM, GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
 
         if (hDevice == INVALID_HANDLE_VALUE) {
-            std::cerr << "[-] InitializeStealthComm: Failed to open handle to KM handshake device. Error: " << GetLastError() << std::endl;
+            LogMessageF("[-] InitializeStealthComm: Failed to open handle to KM handshake device. Error: %lu", GetLastError());
             ShutdownStealthComm();
-            return false;
+            return STATUS_DEVICE_DOES_NOT_EXIST; // Or a more general error
         }
 
         STEALTH_HANDshake_DATA_UM handshakeData;
         handshakeData.ObfuscatedPtrStruct1HeadUmAddress = (PVOID)g_ptr_struct1_head_um;
         if (g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key == 0) {
-            std::cerr << "[-] InitializeStealthComm: dynamic_obfuscation_xor_key is 0. Cannot generate handshake token.\n";
+            LogMessage("[-] InitializeStealthComm: dynamic_obfuscation_xor_key is 0. Cannot generate handshake token.");
             CloseHandle(hDevice);
             ShutdownStealthComm();
-            return false;
+            return STATUS_INVALID_PARAMETER; // Or a custom error
         }
         handshakeData.VerificationToken = g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key;
         memcpy(handshakeData.BeaconPattern, g_dynamic_signatures_relay_data.beacon, BEACON_PATTERN_SIZE);
@@ -332,9 +337,9 @@ namespace StealthComm {
         CloseHandle(hDevice);
 
         if (!success) {
-            std::cerr << "[-] InitializeStealthComm: DeviceIoControl for handshake failed. Error: " << GetLastError() << std::endl;
+            LogMessageF("[-] InitializeStealthComm: DeviceIoControl for handshake failed. Error: %lu", GetLastError());
             ShutdownStealthComm();
-            return false;
+            return STATUS_IO_DEVICE_ERROR; // Or a more general error
         }
 
         // Poll for KM ready flag
@@ -343,7 +348,7 @@ namespace StealthComm {
         const int poll_interval_ms = 100;
         int elapsed_ms = 0;
 
-        std::cout << "[+] InitializeStealthComm: Handshake IOCTL sent. Waiting for KM ready signal..." << std::endl;
+        LogMessage("[+] InitializeStealthComm: Handshake IOCTL sent. Waiting for KM ready signal...");
 
         while (elapsed_ms < timeout_ms) {
             if (g_shared_comm_block->km_fully_initialized_flag == 1) {
@@ -355,15 +360,15 @@ namespace StealthComm {
         }
 
         if (!km_ready) {
-            std::cerr << "[-] InitializeStealthComm: Timed out waiting for KM to set km_fully_initialized_flag." << std::endl;
+            LogMessage("[-] InitializeStealthComm: Timed out waiting for KM to set km_fully_initialized_flag.");
             // Consider if a disconnect IOCTL should be sent here if one existed for aborting setup.
             // For now, just shut down UM side.
             ShutdownStealthComm(); // Clean up UM resources
-            return false;
+            return STATUS_TIMEOUT;
         }
 
-        std::cout << "[+] InitializeStealthComm: KM ready signal received. StealthComm fully initialized." << std::endl;
-        return true;
+        LogMessage("[+] InitializeStealthComm: KM ready signal received. StealthComm fully initialized.");
+        return STATUS_SUCCESS;
     }
 
 
@@ -373,11 +378,11 @@ namespace StealthComm {
         uint64_t& km_status_code, uint32_t timeout_ms)
     {
         if (!g_shared_comm_block) {
-            std::cerr << "[-] SubmitRequestAndWait: Shared communication block not initialized for ReqID " << g_next_request_id.load() << "." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: Shared communication block not initialized for ReqID %u.", g_next_request_id.load());
             return false;
         }
         if (params_size > MAX_PARAM_SIZE) {
-            std::cerr << "[-] SubmitRequestAndWait: Params size " << params_size << " too large for ReqID " << g_next_request_id.load() << "." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: Params size %u too large for ReqID %u.", params_size, g_next_request_id.load());
             return false;
         }
 
@@ -386,11 +391,11 @@ namespace StealthComm {
         uint32_t derived_index_xor_key_um_runtime = (uint32_t)(sig_um_runtime & 0xFFFFFFFF) ^ (uint32_t)(sig_um_runtime >> 32);
 
         if (g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature == 0) {
-             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_shared_comm_block_signature is 0. Cannot manage slot indices.\n";
+             LogMessageF("[-] SubmitRequestAndWait: ReqID %u - dynamic_shared_comm_block_signature is 0. Cannot manage slot indices.", request_id);
             return false;
         }
         if (g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key == 0) {
-             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_obfuscation_xor_key is 0. Cannot derive crypto keys." << std::endl;
+             LogMessageF("[-] SubmitRequestAndWait: ReqID %u - dynamic_obfuscation_xor_key is 0. Cannot derive crypto keys.", request_id);
             return false;
         }
 
@@ -430,7 +435,7 @@ namespace StealthComm {
         }
 
         if (!slot_found) {
-            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - No free communication slot available. Start search plain index: " << current_um_slot_index_plain << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: ReqID %u - No free communication slot available. Start search plain index: %u", request_id, current_um_slot_index_plain);
             return false;
         }
 
@@ -462,10 +467,10 @@ namespace StealthComm {
             // Assuming params can be directly used if not modified, or copied if it's const.
             // Let's assume slot->parameters is the target for ciphertext.
             memcpy(slot->parameters, params, params_size); // Copy plaintext to slot first
-            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, slot->parameters, params_size, slot->parameters, slot->mac_tag);
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, slot->parameters, params_size, slot->parameters, slot->mac_tag); // Already mac_tag
         } else {
             // Even if params_size is 0, we still need to generate a tag for the AAD
-            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, nullptr, 0, nullptr, slot->mac_tag);
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, nullptr, 0, nullptr, slot->mac_tag); // Already mac_tag
         }
         slot->param_size = params_size;
         // StandardLib_Poly1305_MAC_UM is removed. Tag is generated by Encrypt_UM.
@@ -482,7 +487,7 @@ namespace StealthComm {
             SlotStatus current_slot_status_volatile = slot->status;
             if (current_slot_status_volatile == SlotStatus::KM_COMPLETED_SUCCESS || current_slot_status_volatile == SlotStatus::KM_COMPLETED_ERROR) {
                 if (slot->request_id != request_id) {
-                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Mismatched request ID in slot! Expected " << request_id << ", Got " << slot->request_id << ". Critical error." << std::endl;
+                    LogMessageF("[-] SubmitRequestAndWait: ReqID %u - Mismatched request ID in slot! Expected %u, Got %u. Critical error.", request_id, request_id, slot->request_id);
                     InterlockedExchange(reinterpret_cast<volatile LONG*>(&slot->status), static_cast<LONG>(SlotStatus::EMPTY));
                     return false;
                 }
@@ -505,15 +510,15 @@ namespace StealthComm {
                 bool decryption_ok = false;
                 if (slot->output_size > 0) {
                     // Decrypt in-place in slot->output
-                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, slot->output, slot->output_size, slot->output, slot->mac_tag);
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, slot->output, slot->output_size, slot->output, slot->mac_tag); // Already mac_tag
                 } else {
                     // If output_size is 0, still need to verify tag against AAD
                     uint8_t dummy_plaintext; // Decrypt needs a non-null buffer, even for 0 size
-                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, nullptr, 0, &dummy_plaintext, slot->mac_tag);
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, nullptr, 0, &dummy_plaintext, slot->mac_tag); // Already mac_tag
                 }
 
                 if (!decryption_ok) {
-                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - RESPONSE DECRYPTION/TAG VERIFICATION FAILED." << std::endl;
+                    LogMessageF("[-] SubmitRequestAndWait: ReqID %u - RESPONSE DECRYPTION/TAG VERIFICATION FAILED.", request_id);
                     km_status_code = 0xC000A002; // STATUS_AUTH_TAG_MISMATCH
                     // Do not copy output if decryption failed
                 } else {
@@ -543,12 +548,12 @@ namespace StealthComm {
         InterlockedExchange(reinterpret_cast<volatile LONG*>(&slot->status), static_cast<LONG>(SlotStatus::UM_ACKNOWLEDGED));
 
         if (!processed_response && MY_NT_SUCCESS(km_status_code)) { // Check km_status_code if not processed
-            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Request timed out, but km_status_code was " << std::hex << km_status_code << std::dec << "." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: ReqID %u - Request timed out, but km_status_code was 0x%llX.", request_id, km_status_code);
             // If it timed out but KM might have processed it, this is a risky state.
             // For now, we return false, but this might need more sophisticated handling.
             return false;
         } else if (!processed_response) {
-             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Request timed out." << std::endl;
+             LogMessageF("[-] SubmitRequestAndWait: ReqID %u - Request timed out.", request_id);
             return false;
         }
 
@@ -560,7 +565,7 @@ namespace StealthComm {
     bool ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read) {
         if (bytes_read) *bytes_read = 0;
         if (!buffer || size == 0) {
-            std::cerr << "[-] ReadMemory: Invalid buffer or zero size." << std::endl;
+            LogMessage("[-] ReadMemory: Invalid buffer or zero size.");
             return false;
         }
 
@@ -573,7 +578,7 @@ namespace StealthComm {
 
         uint8_t* temp_output_buf = new (std::nothrow) uint8_t[static_cast<uint32_t>(size)];
         if (!temp_output_buf) {
-            std::cerr << "[-] ReadMemory: Failed to allocate temporary output buffer." << std::endl;
+            LogMessage("[-] ReadMemory: Failed to allocate temporary output buffer.");
             return false;
         }
 
@@ -591,13 +596,12 @@ namespace StealthComm {
                 delete[] temp_output_buf;
                 return true;
             } else {
-                 std::cerr << "[-] ReadMemory: KM success but returned output_size (" << actual_read_by_km
-                           << ") > requested size (" << size << ")." << std::endl;
+                 LogMessageF("[-] ReadMemory: KM success but returned output_size (%u) > requested size (%zu).", actual_read_by_km, size);
             }
         } else if (!MY_NT_SUCCESS(km_status_code)) {
-             std::cerr << "[-] ReadMemory: KM returned error status: 0x" << std::hex << km_status_code << std::dec << " for address 0x" << std::hex << address << std::dec << std::endl;
+             LogMessageF("[-] ReadMemory: KM returned error status: 0x%llX for address 0x%p", km_status_code, (void*)address);
         } else if (!success) {
-            std::cerr << "[-] ReadMemory: SubmitRequestAndWait failed for address 0x" << std::hex << address << std::dec << std::endl;
+            LogMessageF("[-] ReadMemory: SubmitRequestAndWait failed for address 0x%p", (void*)address);
         }
         delete[] temp_output_buf;
         return false;
@@ -606,11 +610,11 @@ namespace StealthComm {
     bool WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written) {
         if (bytes_written) *bytes_written = 0;
         if (!buffer || size == 0) {
-            std::cerr << "[-] WriteMemory: Invalid buffer or zero size." << std::endl;
+            LogMessage("[-] WriteMemory: Invalid buffer or zero size.");
             return false;
         }
         if (size > (MAX_PARAM_SIZE - sizeof(uintptr_t) - sizeof(size_t))) {
-             std::cerr << "[-] WriteMemory: Data size " << size << " too large for params buffer." << std::endl;
+             LogMessageF("[-] WriteMemory: Data size %zu too large for params buffer.", size);
             return false;
         }
 
@@ -636,30 +640,29 @@ namespace StealthComm {
                 if (bytes_written) *bytes_written = actual_bytes_written_by_km;
                 return true;
             } else {
-                std::cerr << "[-] WriteMemory: KM success but byte count mismatch. KM wrote: "
-                          << actual_bytes_written_by_km << ", expected: " << size << std::endl;
+                LogMessageF("[-] WriteMemory: KM success but byte count mismatch. KM wrote: %u, expected: %zu", actual_bytes_written_by_km, size);
                 if (bytes_written) *bytes_written = actual_bytes_written_by_km;
                 return false;
             }
         }
         if (!MY_NT_SUCCESS(km_status_code)) {
-             std::cerr << "[-] WriteMemory: KM returned error status: 0x" << std::hex << km_status_code << std::dec << " for address 0x" << std::hex << address << std::dec << std::endl;
+             LogMessageF("[-] WriteMemory: KM returned error status: 0x%llX for address 0x%p", km_status_code, (void*)address);
         } else if (!success) {
-            std::cerr << "[-] WriteMemory: SubmitRequestAndWait failed for address 0x" << std::hex << address << std::dec << std::endl;
+            LogMessageF("[-] WriteMemory: SubmitRequestAndWait failed for address 0x%p", (void*)address);
         }
         return false;
     }
 
     uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name) {
         if (!module_name || module_name[0] == L'\0') {
-            std::cerr << "[-] GetModuleBase: Invalid module name." << std::endl;
+            LogMessage("[-] GetModuleBase: Invalid module name.");
             return 0;
         }
         uint8_t params[MAX_PARAM_SIZE];
         uint32_t params_size = 0;
-        Serialize_wstring(params, module_name, params_size);
+        Serialize_wstring(params, module_name, params_size); // This logs truncation errors internally
         if (params_size == 0 || params_size > MAX_PARAM_SIZE) {
-            std::cerr << "[-] GetModuleBase: Module name too long, empty, or serialization failed." << std::endl;
+            // LogMessage("[-] GetModuleBase: Module name too long, empty, or serialization failed."); // Redundant if Serialize_wstring logs
             return 0;
         }
 
@@ -676,15 +679,24 @@ namespace StealthComm {
                  uintptr_t module_base = Deserialize_uint64(output_buf);
                  return module_base;
             } else {
-                std::cerr << "[-] GetModuleBase: KM success but output_size (" << output_size_in_out
-                          << ") != sizeof(uintptr_t) for module " << module_name << "." << std::endl;
+                // Convert module_name to char* for LogMessageF or use a wide string logger if available
+                char narrow_module_name[128];
+                size_t converted_chars = 0;
+                wcstombs_s(&converted_chars, narrow_module_name, sizeof(narrow_module_name), module_name, _TRUNCATE);
+                LogMessageF("[-] GetModuleBase: KM success but output_size (%u) != sizeof(uintptr_t) for module %s.", output_size_in_out, narrow_module_name);
                 return 0;
             }
         }
         if (!MY_NT_SUCCESS(km_status_code) && !(km_status_code == 0xC0000034L /*STATUS_OBJECT_NAME_NOT_FOUND*/ || km_status_code == 0xC0000225L /*STATUS_NOT_FOUND*/ ) ) {
-            std::wcerr << L"[-] GetModuleBase: KM returned error status: 0x" << std::hex << km_status_code << std::dec << L" for module " << module_name << std::endl;
+            char narrow_module_name_err[128];
+            size_t converted_chars_err = 0;
+            wcstombs_s(&converted_chars_err, narrow_module_name_err, sizeof(narrow_module_name_err), module_name, _TRUNCATE);
+            LogMessageF("[-] GetModuleBase: KM returned error status: 0x%llX for module %s", km_status_code, narrow_module_name_err);
         } else if (!success) {
-            std::wcerr << L"[-] GetModuleBase: SubmitRequestAndWait failed for module " << module_name << std::endl;
+            char narrow_module_name_fail[128];
+            size_t converted_chars_fail = 0;
+            wcstombs_s(&converted_chars_fail, narrow_module_name_fail, sizeof(narrow_module_name_fail), module_name, _TRUNCATE);
+            LogMessageF("[-] GetModuleBase: SubmitRequestAndWait failed for module %s", narrow_module_name_fail);
         }
         return 0;
     }
@@ -695,7 +707,7 @@ namespace StealthComm {
         UNREFERENCED_PARAMETER(mask);
 
         if (!pattern || pattern[0] == '\0') {
-            std::cerr << "[-] AobScan: Invalid or empty pattern." << std::endl;
+            LogMessage("[-] AobScan: Invalid or empty pattern.");
             return 0;
         }
 
@@ -708,7 +720,7 @@ namespace StealthComm {
 
         size_t pattern_str_len = strlen(pattern) + 1;
         if (current_offset + pattern_str_len > MAX_PARAM_SIZE) {
-            std::cerr << "[-] AobScan: Pattern string too long for parameters buffer." << std::endl;
+            LogMessage("[-] AobScan: Pattern string too long for parameters buffer.");
             return 0;
         }
         memcpy(params + current_offset, pattern, pattern_str_len);
@@ -733,23 +745,21 @@ namespace StealthComm {
             } else if (output_buf_capacity == 0 && MY_NT_SUCCESS(km_status_code)) {
                  return 0;
             } else {
-                std::cerr << "[-] AobScan: KM success but returned unexpected output_size (" << output_buf_capacity
-                          << "). Expected sizeof(uintptr_t) or 0." << std::endl;
+                LogMessageF("[-] AobScan: KM success but returned unexpected output_size (%u). Expected sizeof(uintptr_t) or 0.", output_buf_capacity);
                 return 0;
             }
         }
         if (!MY_NT_SUCCESS(km_status_code) && !(km_status_code == 0xC0000034L || km_status_code == 0xC0000225L )) {
-            std::cerr << "[-] AobScan: KM returned error status: 0x" << std::hex << km_status_code << std::dec
-                      << " for pattern \"" << pattern << "\"." << std::endl;
+            LogMessageF("[-] AobScan: KM returned error status: 0x%llX for pattern \"%s\".", km_status_code, pattern);
         } else if (!success) {
-             std::cerr << "[-] AobScan: SubmitRequestAndWait failed for pattern \"" << pattern << "\"." << std::endl;
+             LogMessageF("[-] AobScan: SubmitRequestAndWait failed for pattern \"%s\".", pattern);
         }
         return 0;
     }
 
     uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address) {
         if (size == 0) {
-            std::cerr << "[-] AllocateMemory: Allocation size cannot be zero." << std::endl;
+            LogMessage("[-] AllocateMemory: Allocation size cannot be zero.");
             return 0;
         }
         uint8_t params[sizeof(size_t) + sizeof(uintptr_t)]; // Params are: UINT64 size, UINT64 hint_address
@@ -774,24 +784,25 @@ namespace StealthComm {
                 if (allocated_address != 0) {
                     return allocated_address;
                 } else {
-                    std::cerr << "[-] AllocateMemory: KM reported success but returned allocated address 0 for size " << size << "." << std::endl;
+                    LogMessageF("[-] AllocateMemory: KM reported success but returned allocated address 0 for size %zu.", size);
                     return 0;
                 }
             } else {
-                 std::cerr << "[-] AllocateMemory: KM success but returned unexpected output_size (" << output_size_in_out
-                          << "). Expected sizeof(uintptr_t)." << std::endl;
+                 LogMessageF("[-] AllocateMemory: KM success but returned unexpected output_size (%u). Expected sizeof(uintptr_t).", output_size_in_out);
                 return 0;
             }
         }
         if (!MY_NT_SUCCESS(km_status_code)) {
-            std::cerr << "[-] AllocateMemory: KM returned error status: 0x" << std::hex << km_status_code << std::dec << " for size " << size << "." << std::endl;
+            LogMessageF("[-] AllocateMemory: KM returned error status: 0x%llX for size %zu.", km_status_code, size);
         } else if(!success) {
-            std::cerr << "[-] AllocateMemory: SubmitRequestAndWait failed for size " << size << "." << std::endl;
+            LogMessageF("[-] AllocateMemory: SubmitRequestAndWait failed for size %zu.", size);
         }
         return 0;
     }
     // ... (ShutdownStealthComm - UNCHANGED) ...
     void ShutdownStealthComm() {
+        // This function itself does not log, but the actions it calls (VirtualFree) might have OS-level events.
+        // If verbose logging of shutdown is needed, add LogMessage calls here.
         if (g_ptr_struct1_head_um) { VirtualFree(g_ptr_struct1_head_um, 0, MEM_RELEASE); g_ptr_struct1_head_um = nullptr; }
         if (g_ptr_struct2_um) { VirtualFree(g_ptr_struct2_um, 0, MEM_RELEASE); g_ptr_struct2_um = nullptr; }
         if (g_ptr_struct3_um) { VirtualFree(g_ptr_struct3_um, 0, MEM_RELEASE); g_ptr_struct3_um = nullptr; }
@@ -801,7 +812,7 @@ namespace StealthComm {
 
     bool FreeMemory(uint64_t target_pid, uintptr_t address, size_t size) {
         if (address == 0) {
-            std::cerr << "[-] FreeMemory: Address cannot be zero." << std::endl;
+            LogMessage("[-] FreeMemory: Address cannot be zero.");
             return false;
         }
         // Size is passed to KM, but KM's ZwFreeVirtualMemory with MEM_RELEASE will use 0 for size.
@@ -822,13 +833,10 @@ namespace StealthComm {
             output_buf, output_size_in_out, km_status_code);
 
         if (!success || !MY_NT_SUCCESS(km_status_code)) {
-            std::cerr << "[-] FreeMemory: Failed to free memory at address 0x" << std::hex << address
-                      << std::dec << ". KM Status: 0x" << std::hex << km_status_code << std::dec << std::endl;
+            LogMessageF("[-] FreeMemory: Failed to free memory at address 0x%p. KM Status: 0x%llX", (void*)address, km_status_code);
             return false;
         }
-        #ifdef _DEBUG
-        std::cout << "[+] FreeMemory: Successfully requested KM to free memory at 0x" << std::hex << address << std::dec << std::endl;
-        #endif
+        LogMessageF("[+] FreeMemory: Successfully requested KM to free memory at 0x%p", (void*)address); // Keep debug log for success
         return true;
     }
 
@@ -840,11 +848,11 @@ namespace StealthComm {
         /*uint64_t& km_status_code,*/ uint32_t timeout_ms) // km_status_code removed from params, will be return value
     {
         if (!g_shared_comm_block) {
-            std::cerr << "[-] SubmitRequestAndWait: Shared communication block not initialized for ReqID " << g_next_request_id.load() << "." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: Shared communication block not initialized for ReqID %u.", g_next_request_id.load());
             return STATUS_INVALID_DEVICE_STATE; // Or a custom error
         }
         if (params_size > MAX_PARAM_SIZE) {
-            std::cerr << "[-] SubmitRequestAndWait: Params size " << params_size << " too large for ReqID " << g_next_request_id.load() << "." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: Params size %u too large for ReqID %u.", params_size, g_next_request_id.load());
             return STATUS_INVALID_BUFFER_SIZE; // Or a custom error
         }
 
@@ -853,11 +861,11 @@ namespace StealthComm {
         uint32_t derived_index_xor_key_um_runtime = (uint32_t)(sig_um_runtime & 0xFFFFFFFF) ^ (uint32_t)(sig_um_runtime >> 32);
 
         if (g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature == 0) {
-             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_shared_comm_block_signature is 0. Cannot manage slot indices.\n";
+             LogMessageF("[-] SubmitRequestAndWait: ReqID %u - dynamic_shared_comm_block_signature is 0. Cannot manage slot indices.", request_id);
             return STATUS_INVALID_DEVICE_STATE;
         }
         if (g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key == 0) {
-             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_obfuscation_xor_key is 0. Cannot derive crypto keys." << std::endl;
+             LogMessageF("[-] SubmitRequestAndWait: ReqID %u - dynamic_obfuscation_xor_key is 0. Cannot derive crypto keys.", request_id);
             return STATUS_INVALID_KEY;
         }
 
@@ -897,7 +905,7 @@ namespace StealthComm {
         }
 
         if (!slot_found) {
-            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - No free communication slot available. Start search plain index: " << current_um_slot_index_plain << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: ReqID %u - No free communication slot available. Start search plain index: %u", request_id, current_um_slot_index_plain);
             return STATUS_NO_MEMORY; // Or a more specific "no available slot" error
         }
 
@@ -923,9 +931,9 @@ namespace StealthComm {
 
         if (params && params_size > 0) {
             memcpy(slot->parameters, params, params_size);
-            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, slot->parameters, params_size, slot->parameters, slot->mac_tag);
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, slot->parameters, params_size, slot->parameters, slot->mac_tag); // Already mac_tag
         } else {
-            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, nullptr, 0, nullptr, slot->mac_tag);
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, nullptr, 0, nullptr, slot->mac_tag); // Already mac_tag
         }
         slot->param_size = params_size;
         slot->output_size = 0; // Initialize output size for KM
@@ -943,7 +951,7 @@ namespace StealthComm {
             SlotStatus current_slot_status_volatile = slot->status; // Read volatile once
             if (current_slot_status_volatile == SlotStatus::KM_COMPLETED_SUCCESS || current_slot_status_volatile == SlotStatus::KM_COMPLETED_ERROR) {
                 if (slot->request_id != request_id) {
-                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Mismatched request ID in slot! Expected " << request_id << ", Got " << slot->request_id << ". Critical error." << std::endl;
+                    LogMessageF("[-] SubmitRequestAndWait: ReqID %u - Mismatched request ID in slot! Expected %u, Got %u. Critical error.", request_id, request_id, slot->request_id);
                     final_status = STATUS_DATA_ERROR; // Critical error
                     // Do not change slot status here, let UM_ACKNOWLEDGED handle it if possible
                     processed_response = true; // Break loop, error state
@@ -965,19 +973,19 @@ namespace StealthComm {
 
                 bool decryption_ok = false;
                 if (slot->output_size > 0 && slot->output_size <= MAX_OUTPUT_SIZE_KM) { // Check against KM max
-                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, slot->output, slot->output_size, slot->output, slot->mac_tag);
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, slot->output, slot->output_size, slot->output, slot->mac_tag); // Already mac_tag
                 } else if (slot->output_size == 0) {
                     uint8_t dummy_plaintext;
-                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, nullptr, 0, &dummy_plaintext, slot->mac_tag);
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, nullptr, 0, &dummy_plaintext, slot->mac_tag); // Already mac_tag
                 } else { // output_size > MAX_OUTPUT_SIZE_KM
-                     std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - KM returned output_size (" << slot->output_size << ") > MAX_OUTPUT_SIZE_KM (" << MAX_OUTPUT_SIZE_KM << ")." << std::endl;
+                     LogMessageF("[-] SubmitRequestAndWait: ReqID %u - KM returned output_size (%u) > MAX_OUTPUT_SIZE_KM (%u).", request_id, slot->output_size, MAX_OUTPUT_SIZE_KM);
                      final_status = STATUS_BUFFER_OVERFLOW; // Or similar error
                      decryption_ok = false; // Cannot proceed with decryption
                 }
 
 
                 if (!decryption_ok) {
-                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - RESPONSE DECRYPTION/TAG VERIFICATION FAILED." << std::endl;
+                    LogMessageF("[-] SubmitRequestAndWait: ReqID %u - RESPONSE DECRYPTION/TAG VERIFICATION FAILED.", request_id);
                     if (NT_SUCCESS(final_status)) { // If KM reported success but decryption failed
                         final_status = STATUS_MAC_INCORRECT; // More specific error
                     }
@@ -1006,7 +1014,7 @@ namespace StealthComm {
         InterlockedExchange(reinterpret_cast<volatile LONG*>(&slot->status), static_cast<LONG>(SlotStatus::UM_ACKNOWLEDGED));
 
         if (!processed_response) {
-            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Request timed out." << std::endl;
+            LogMessageF("[-] SubmitRequestAndWait: ReqID %u - Request timed out.", request_id);
             return STATUS_TIMEOUT;
         }
 
@@ -1016,7 +1024,7 @@ namespace StealthComm {
     NTSTATUS ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read) {
         if (bytes_read) *bytes_read = 0;
         if (!buffer || size == 0) {
-            std::cerr << "[-] ReadMemory: Invalid buffer or zero size." << std::endl;
+            LogMessage("[-] ReadMemory: Invalid buffer or zero size.");
             return STATUS_INVALID_PARAMETER;
         }
 
@@ -1033,7 +1041,7 @@ namespace StealthComm {
         // or the KM needs to handle chunking (which it doesn't currently).
         // For now, assume 'size' will be <= MAX_OUTPUT_SIZE.
         if (size > MAX_OUTPUT_SIZE_KM) { // Check against KM's max output
-            std::cerr << "[-] ReadMemory: Requested read size " << size << " exceeds MAX_OUTPUT_SIZE_KM " << MAX_OUTPUT_SIZE_KM << "." << std::endl;
+            LogMessageF("[-] ReadMemory: Requested read size %zu exceeds MAX_OUTPUT_SIZE_KM %u.", size, MAX_OUTPUT_SIZE_KM);
             return STATUS_BUFFER_TOO_SMALL;
         }
 
@@ -1051,13 +1059,12 @@ namespace StealthComm {
                 memcpy(buffer, temp_output_buf, actual_read_by_km_or_slot_max);
             } else {
                  // This case should ideally not happen if KM respects the requested size and slot limits.
-                 std::cerr << "[-] ReadMemory: SubmitRequestAndWait returned more data (" << actual_read_by_km_or_slot_max
-                           << ") than requested size (" << size << ") or slot capacity." << std::endl;
+                 LogMessageF("[-] ReadMemory: SubmitRequestAndWait returned more data (%u) than requested size (%zu) or slot capacity.", actual_read_by_km_or_slot_max, size);
                  if (bytes_read) *bytes_read = 0; // Indicate error or partial/no data
                  return STATUS_INTERNAL_ERROR; // Or some other error
             }
         } else {
-             // Log specific error from SubmitRequestAndWait if needed, but it already logs.
+             // LogMessageF("[-] ReadMemory: SubmitRequestAndWait failed with status 0x%lX", status); // Already logged by SubmitRequestAndWait
         }
         return status;
     }
@@ -1065,12 +1072,12 @@ namespace StealthComm {
     NTSTATUS WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written) {
         if (bytes_written) *bytes_written = 0;
         if (!buffer || size == 0) {
-            std::cerr << "[-] WriteMemory: Invalid buffer or zero size." << std::endl;
+            LogMessage("[-] WriteMemory: Invalid buffer or zero size.");
             return STATUS_INVALID_PARAMETER;
         }
         // Param buffer for write: address (u64) + size_to_write (u64) + data_itself (up to MAX_PARAM_SIZE - headers)
         if (size > (MAX_PARAM_SIZE_KM - (sizeof(uintptr_t) + sizeof(size_t)))) {
-             std::cerr << "[-] WriteMemory: Data size " << size << " too large for params buffer." << std::endl;
+             LogMessageF("[-] WriteMemory: Data size %zu too large for params buffer.", size);
             return STATUS_BUFFER_TOO_SMALL;
         }
 
@@ -1097,8 +1104,7 @@ namespace StealthComm {
             } else {
                 // This might indicate an issue if KM wrote less than requested but reported success.
                 // Or if output_data_len was not set as expected.
-                std::cerr << "[-] WriteMemory: KM success but output_data_len (" << output_data_len
-                          << ") != requested size (" << size << ")." << std::endl;
+                LogMessageF("[-] WriteMemory: KM success but output_data_len (%u) != requested size (%zu).", output_data_len, size);
                 if (bytes_written) *bytes_written = output_data_len; // Report what KM claimed
                 // Consider returning an error if this mismatch is critical
             }
@@ -1108,7 +1114,7 @@ namespace StealthComm {
 
     uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name) {
         if (!module_name || module_name[0] == L'\0') {
-            std::cerr << "[-] GetModuleBase: Invalid module name." << std::endl;
+            LogMessage("[-] GetModuleBase: Invalid module name.");
             return 0; // Keep returning 0 for error in this specific wrapper for now
         }
         uint8_t params[MAX_PARAM_SIZE_KM];
@@ -1116,7 +1122,11 @@ namespace StealthComm {
         // Custom serialization for wstring to ensure it fits and is null-terminated.
         size_t module_name_len_bytes = (wcslen(module_name) + 1) * sizeof(wchar_t);
         if (module_name_len_bytes > MAX_PARAM_SIZE_KM) {
-            std::wcerr << L"[-] GetModuleBase: Module name '" << module_name << L"' too long." << std::endl;
+            // Convert module_name to char* for LogMessageF or use a wide string logger if available
+            char narrow_module_name[128]; // Assuming module names are not excessively long
+            size_t converted_chars = 0;
+            wcstombs_s(&converted_chars, narrow_module_name, sizeof(narrow_module_name), module_name, _TRUNCATE);
+            LogMessageF("[-] GetModuleBase: Module name '%s' too long.", narrow_module_name);
             return 0;
         }
         memcpy(params, module_name, module_name_len_bytes);
@@ -1135,8 +1145,10 @@ namespace StealthComm {
                  uintptr_t module_base = Deserialize_uint64(output_buf);
                  return module_base;
             } else {
-                std::wcerr << L"[-] GetModuleBase: KM success but output_size (" << output_size_in_out
-                          << L") != sizeof(uintptr_t) for module " << module_name << L"." << std::endl;
+                char narrow_module_name_out[128];
+                size_t converted_chars_out = 0;
+                wcstombs_s(&converted_chars_out, narrow_module_name_out, sizeof(narrow_module_name_out), module_name, _TRUNCATE);
+                LogMessageF("[-] GetModuleBase: KM success but output_size (%u) != sizeof(uintptr_t) for module %s.", output_size_in_out, narrow_module_name_out);
                 return 0;
             }
         }
@@ -1144,7 +1156,10 @@ namespace StealthComm {
         // SubmitRequestAndWait or KM might have already logged.
         // Only log if status is an error and not a "not found" type error for this one.
         if (!NT_SUCCESS(status) && !(status == 0xC0000034L /*STATUS_OBJECT_NAME_NOT_FOUND typically from ObReferenceObjectByName*/ || status == 0xC0000225L /*STATUS_NOT_FOUND*/ ) ) {
-             std::wcerr << L"[-] GetModuleBase: KM returned error status: 0x" << std::hex << status << std::dec << L" for module " << module_name << std::endl;
+             char narrow_module_name_err_km[128];
+             size_t converted_chars_err_km = 0;
+             wcstombs_s(&converted_chars_err_km, narrow_module_name_err_km, sizeof(narrow_module_name_err_km), module_name, _TRUNCATE);
+             LogMessageF("[-] GetModuleBase: KM returned error status: 0x%lX for module %s", status, narrow_module_name_err_km);
         }
         return 0;
     }
@@ -1157,7 +1172,7 @@ namespace StealthComm {
         UNREFERENCED_PARAMETER(saved_bytes_size);
 
         if (!pattern || pattern[0] == '\0') {
-            std::cerr << "[-] AobScan: Invalid or empty pattern." << std::endl;
+            LogMessage("[-] AobScan: Invalid or empty pattern.");
             return 0;
         }
 
@@ -1170,7 +1185,7 @@ namespace StealthComm {
 
         size_t pattern_str_len = strlen(pattern) + 1; // Include null terminator
         if (current_offset + pattern_str_len > MAX_PARAM_SIZE_KM) {
-            std::cerr << "[-] AobScan: Pattern string too long for parameters buffer." << std::endl;
+            LogMessage("[-] AobScan: Pattern string too long for parameters buffer.");
             return 0;
         }
         memcpy(params + current_offset, pattern, pattern_str_len);
@@ -1190,22 +1205,20 @@ namespace StealthComm {
             } else if (output_buf_capacity == 0 && NT_SUCCESS(status)) { // Not found but KM call was success
                  return 0;
             } else { // Unexpected output size
-                std::cerr << "[-] AobScan: KM success but returned unexpected output_size (" << output_buf_capacity
-                          << "). Expected sizeof(uintptr_t) or 0." << std::endl;
+                LogMessageF("[-] AobScan: KM success but returned unexpected output_size (%u). Expected sizeof(uintptr_t) or 0.", output_buf_capacity);
                 return 0;
             }
         }
         // Only log if status is an error and not a "not found" type error for this one.
         if (!NT_SUCCESS(status) && !(status == 0xC0000034L || status == 0xC0000225L )) {
-             std::cerr << "[-] AobScan: KM returned error status: 0x" << std::hex << status << std::dec
-                      << " for pattern \"" << pattern << "\"." << std::endl;
+             LogMessageF("[-] AobScan: KM returned error status: 0x%lX for pattern \"%s\".", status, pattern);
         }
         return 0;
     }
 
     uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address) {
         if (size == 0) {
-            std::cerr << "[-] AllocateMemory: Allocation size cannot be zero." << std::endl;
+            LogMessage("[-] AllocateMemory: Allocation size cannot be zero.");
             return 0;
         }
         uint8_t params[sizeof(uint64_t) + sizeof(uintptr_t)];
@@ -1228,22 +1241,21 @@ namespace StealthComm {
                 if (allocated_address != 0) {
                     return allocated_address;
                 } else { // KM success but returned 0, unusual
-                    std::cerr << "[-] AllocateMemory: KM reported success but returned allocated address 0 for size " << size << "." << std::endl;
+                    LogMessageF("[-] AllocateMemory: KM reported success but returned allocated address 0 for size %zu.", size);
                     return 0;
                 }
             } else {
-                 std::cerr << "[-] AllocateMemory: KM success but returned unexpected output_size (" << output_size_in_out
-                          << "). Expected sizeof(uintptr_t)." << std::endl;
+                 LogMessageF("[-] AllocateMemory: KM success but returned unexpected output_size (%u). Expected sizeof(uintptr_t).", output_size_in_out);
                 return 0;
             }
         }
-        // Log specific error from SubmitRequestAndWait if needed.
+        // LogMessageF("[-] AllocateMemory: SubmitRequestAndWait failed with status 0x%lX for size %zu", status, size); // Already logged by SubmitRequestAndWait
         return 0;
     }
 
     NTSTATUS FreeMemory(uint64_t target_pid, uintptr_t address, size_t size) { // Return NTSTATUS
         if (address == 0) {
-            std::cerr << "[-] FreeMemory: Address cannot be zero." << std::endl;
+            LogMessage("[-] FreeMemory: Address cannot be zero.");
             return STATUS_INVALID_PARAMETER_2; // Address is param 2 conceptually after PID
         }
 
@@ -1264,14 +1276,11 @@ namespace StealthComm {
         // SubmitRequestAndWait already logs general errors like timeout.
         // We might log specific failure for FreeMemory if status is an error.
         if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] FreeMemory: Failed to free memory at address 0x" << std::hex << address
-                      << std::dec << ". Status: 0x" << std::hex << status << std::dec << std::endl;
+            LogMessageF("[-] FreeMemory: Failed to free memory at address 0x%p. Status: 0x%lX", (void*)address, status);
         }
-        #ifdef _DEBUG
         else { // Only log success in debug
-             std::cout << "[+] FreeMemory: Successfully requested KM to free memory at 0x" << std::hex << address << std::dec << std::endl;
+             LogMessageF("[+] FreeMemory: Successfully requested KM to free memory at 0x%p", (void*)address);
         }
-        #endif
         return status;
     }
 

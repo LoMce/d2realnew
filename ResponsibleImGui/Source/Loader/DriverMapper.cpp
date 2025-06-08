@@ -1,25 +1,36 @@
 #include "DriverMapper.h"
 #include "embedded/kdmapper_exe.h" // Contains const unsigned char kdmapper_exe[] and kdmapper_exe_len
 #include "embedded/KM_sys.h"      // Contains const unsigned char KM_sys[] and KM_sys_len
-#include <iostream>
+// #include <iostream> // Replaced by Logging.h
 #include <fstream>
 #include <string> // Required for std::string, std::wstring
 #include <vector> // Required for std::vector
 #include <Windows.h>
 #include <filesystem> // For std::filesystem::path operations if needed, though GetTempPathW/GetTempFileNameW are primary
+#include <sstream> // For std::wstringstream
+#include "../ImGui Standalone/Logging.h" // Added Logging.h
 
 // Note: <filesystem> might require C++17. If using an older standard,
 // manual path concatenation would be needed, or stick to GetTempFileNameW's output.
 
+// Helper to convert wstring to string for logging
+static std::string WStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
 namespace DriverMapper {
 
 static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdmapper_size, const unsigned char* driver_data, unsigned int driver_size) {
-    std::wcout << L"[+] Starting kdmapper execution using temporary files..." << std::endl;
+    LogMessage("[+] Starting kdmapper execution using temporary files...");
 
     wchar_t tempPathChars[MAX_PATH];
     DWORD pathLen = GetTempPathW(MAX_PATH, tempPathChars);
     if (pathLen == 0 || pathLen > MAX_PATH) {
-        std::wcerr << L"[-] ExecuteKdmapper: GetTempPathW failed. Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: GetTempPathW failed. Error: %lu", GetLastError());
         return false;
     }
 
@@ -27,7 +38,7 @@ static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdm
     wchar_t tempKdmapperPath[MAX_PATH];
     UINT kdmapperFileResult = GetTempFileNameW(tempPathChars, L"KDM", 0, tempKdmapperPath);
     if (kdmapperFileResult == 0) {
-        std::wcerr << L"[-] ExecuteKdmapper: GetTempFileNameW for kdmapper.exe failed. Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: GetTempFileNameW for kdmapper.exe failed. Error: %lu", GetLastError());
         return false;
     }
     std::wstring kdmapperPathStr = tempKdmapperPath;
@@ -42,7 +53,7 @@ static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdm
     wchar_t tempDriverSysPath[MAX_PATH];
     UINT driverFileResult = GetTempFileNameW(tempPathChars, L"SYS", 0, tempDriverSysPath);
     if (driverFileResult == 0) {
-        std::wcerr << L"[-] ExecuteKdmapper: GetTempFileNameW for driver .sys file failed. Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: GetTempFileNameW for driver .sys file failed. Error: %lu", GetLastError());
         DeleteFileW(kdmapperPathStr.c_str()); // Clean up kdmapper if created
         return false;
     }
@@ -55,31 +66,31 @@ static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdm
     // Write kdmapper_data to tempKdmapperPath
     std::ofstream kdmapperFile(kdmapperPathStr, std::ios::binary | std::ios::trunc);
     if (!kdmapperFile.is_open()) {
-        std::wcerr << L"[-] ExecuteKdmapper: Failed to create temporary kdmapper file: " << kdmapperPathStr << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: Failed to create temporary kdmapper file: %s", WStringToString(kdmapperPathStr).c_str());
         DeleteFileW(driverSysPathStr.c_str());
         return false;
     }
     kdmapperFile.write(reinterpret_cast<const char*>(kdmapper_data), kdmapper_size);
     kdmapperFile.close();
-    std::wcout << L"[+] ExecuteKdmapper: kdmapper.exe written to: " << kdmapperPathStr << std::endl;
+    LogMessageF("[+] ExecuteKdmapper: kdmapper.exe written to: %s", WStringToString(kdmapperPathStr).c_str());
 
     // Write driver_data to tempDriverSysPath
     std::ofstream driverFile(driverSysPathStr, std::ios::binary | std::ios::trunc);
     if (!driverFile.is_open()) {
-        std::wcerr << L"[-] ExecuteKdmapper: Failed to create temporary driver file: " << driverSysPathStr << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: Failed to create temporary driver file: %s", WStringToString(driverSysPathStr).c_str());
         DeleteFileW(kdmapperPathStr.c_str()); // Clean up kdmapper
         return false;
     }
     driverFile.write(reinterpret_cast<const char*>(driver_data), driver_size);
     driverFile.close();
-    std::wcout << L"[+] ExecuteKdmapper: Driver .sys data written to: " << driverSysPathStr << std::endl;
+    LogMessageF("[+] ExecuteKdmapper: Driver .sys data written to: %s", WStringToString(driverSysPathStr).c_str());
 
     // Construct command line for kdmapper.exe
     // Example: "C:\temp\kdmapperXYZ.exe" /free /mdl /unlink "C:\temp\driverABC.sys"
     std::wstringstream commandLineStream;
     commandLineStream << L"\"" << kdmapperPathStr << L"\" /free /mdl /unlink \"" << driverSysPathStr << L"\"";
     std::wstring commandLine = commandLineStream.str();
-    std::wcout << L"[+] ExecuteKdmapper: Command line: " << commandLine << std::endl;
+    LogMessageF("[+] ExecuteKdmapper: Command line: %s", WStringToString(commandLine).c_str());
 
     STARTUPINFOW si = {};
     PROCESS_INFORMATION pi = {};
@@ -106,36 +117,36 @@ static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdm
         &si,               // STARTUPINFO
         &pi                // PROCESS_INFORMATION
     )) {
-        std::wcout << L"[+] ExecuteKdmapper: kdmapper.exe process created. PID: " << pi.dwProcessId << std::endl;
-        std::wcout << L"[+] ExecuteKdmapper: Waiting for kdmapper.exe to finish..." << std::endl;
+        LogMessageF("[+] ExecuteKdmapper: kdmapper.exe process created. PID: %lu", pi.dwProcessId);
+        LogMessage("[+] ExecuteKdmapper: Waiting for kdmapper.exe to finish...");
         WaitForSingleObject(pi.hProcess, INFINITE); // Wait indefinitely
 
         if (GetExitCodeProcess(pi.hProcess, &exitCode)) {
             if (exitCode == 0) {
-                std::wcout << L"[+] ExecuteKdmapper: kdmapper.exe exited successfully (Exit Code: 0)." << std::endl;
+                LogMessage("[+] ExecuteKdmapper: kdmapper.exe exited successfully (Exit Code: 0).");
                 success = true;
             } else {
-                std::wcerr << L"[-] ExecuteKdmapper: kdmapper.exe failed (Exit Code: " << exitCode << L")." << std::endl;
+                LogMessageF("[-] ExecuteKdmapper: kdmapper.exe failed (Exit Code: %lu).", exitCode);
             }
         } else {
-            std::wcerr << L"[-] ExecuteKdmapper: GetExitCodeProcess failed. Error: " << GetLastError() << std::endl;
+            LogMessageF("[-] ExecuteKdmapper: GetExitCodeProcess failed. Error: %lu", GetLastError());
         }
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
     } else {
-        std::wcerr << L"[-] ExecuteKdmapper: CreateProcessW failed for kdmapper.exe. Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: CreateProcessW failed for kdmapper.exe. Error: %lu", GetLastError());
     }
 
     // Cleanup temporary files
     if (!DeleteFileW(kdmapperPathStr.c_str())) {
-        std::wcerr << L"[-] ExecuteKdmapper: Failed to delete temporary kdmapper.exe: " << kdmapperPathStr << L". Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: Failed to delete temporary kdmapper.exe: %s. Error: %lu", WStringToString(kdmapperPathStr).c_str(), GetLastError());
     } else {
-        std::wcout << L"[+] ExecuteKdmapper: Cleaned up temporary kdmapper.exe: " << kdmapperPathStr << std::endl;
+        LogMessageF("[+] ExecuteKdmapper: Cleaned up temporary kdmapper.exe: %s", WStringToString(kdmapperPathStr).c_str());
     }
     if (!DeleteFileW(driverSysPathStr.c_str())) {
-        std::wcerr << L"[-] ExecuteKdmapper: Failed to delete temporary driver .sys file: " << driverSysPathStr << L". Error: " << GetLastError() << std::endl;
+        LogMessageF("[-] ExecuteKdmapper: Failed to delete temporary driver .sys file: %s. Error: %lu", WStringToString(driverSysPathStr).c_str(), GetLastError());
     } else {
-        std::wcout << L"[+] ExecuteKdmapper: Cleaned up temporary driver .sys file: " << driverSysPathStr << std::endl;
+        LogMessageF("[+] ExecuteKdmapper: Cleaned up temporary driver .sys file: %s", WStringToString(driverSysPathStr).c_str());
     }
 
     return success;
@@ -143,46 +154,51 @@ static bool ExecuteKdmapper(const unsigned char* kdmapper_data, unsigned int kdm
 
 
 bool MapDriver() {
-    std::wcout << L"[+] Starting driver mapping process..." << std::endl;
+    LogMessage("[+] Starting driver mapping process...");
     
     try {
         // Using embedded data from headers
         if (!ExecuteKdmapper(kdmapper_exe, kdmapper_exe_len, KM_sys, KM_sys_len)) {
-            std::wcerr << L"[-] Driver mapping failed using kdmapper." << std::endl;
+            LogMessage("[-] Driver mapping failed using kdmapper.");
             return false;
         }
         
-        std::wcout << L"[+] Driver mapping process completed by kdmapper." << std::endl;
+        LogMessage("[+] Driver mapping process completed by kdmapper.");
         Sleep(1000); // Brief pause for driver to initialize (common practice)
 
         if (IsDriverLoaded()) { // This will now use the NOP check
-            std::wcout << L"[+] Driver presence verified after mapping!" << std::endl;
+            LogMessage("[+] Driver presence verified after mapping!");
             return true;
         } else {
-            std::wcerr << L"[-] Driver presence verification failed after mapping attempt!" << std::endl;
+            LogMessage("[-] Driver presence verification failed after mapping attempt!");
             return false;
         }
     }
     catch (const std::exception& e) {
-        std::wcerr << L"[-] Exception during driver mapping: " << e.what() << std::endl;
+        LogMessageF("[-] Exception during driver mapping: %s", e.what());
         return false;
     }
      catch (...) {
-        std::wcerr << L"[-] Unknown exception during driver mapping." << std::endl;
+        LogMessage("[-] Unknown exception during driver mapping.");
         return false;
     }
 }
 
 bool IsDriverLoaded() {
-    std::wcout << L"[*] IsDriverLoaded: Attempting to verify driver presence via StealthComm NOP..." << std::endl;
+    LogMessage("[*] IsDriverLoaded: Attempting to verify driver presence via StealthComm NOP...");
 
-    if (!StealthComm::g_shared_comm_block) { // Check if UM side is initialized
-         std::wcout << L"[~] IsDriverLoaded: StealthComm not initialized by main logic yet. Attempting temporary init for check." << std::endl;
-        if (!StealthComm::InitializeStealthComm()) {
-            std::wcerr << L"[-] IsDriverLoaded: StealthComm::InitializeStealthComm() failed during temporary check. Assuming driver is not loaded." << std::endl;
+    bool was_initialized_by_us = false;
+    if (!StealthComm::g_shared_comm_block) { // Check if not already initialized by someone else
+        LogMessage("[~] IsDriverLoaded: StealthComm not initialized by main logic yet. Attempting temporary init for check.");
+        NTSTATUS init_status = StealthComm::InitializeStealthComm();
+        if (!NT_SUCCESS(init_status)) {
+            LogMessageF("[-] IsDriverLoaded: StealthComm::InitializeStealthComm() failed with status 0x%lX. Assuming driver is not loaded.", init_status);
             return false; // Cannot check if comms cannot be initialized
         }
-         std::wcout << L"[+] IsDriverLoaded: StealthComm temporarily initialized for check." << std::endl;
+        was_initialized_by_us = true;
+        LogMessage("[+] IsDriverLoaded: StealthComm temporarily initialized for check.");
+    } else {
+        LogMessage("[*] IsDriverLoaded: StealthComm was already initialized. Proceeding with check.");
     }
 
 
@@ -208,19 +224,27 @@ bool IsDriverLoaded() {
     // A simple flag passed to InitializeStealthComm could indicate "init_for_check_only".
     // For now, we won't automatically shut down here to avoid breaking main flow if it was already up.
 
-    if (request_success && MY_NT_SUCCESS(km_status_code)) {
-        std::wcout << L"[+] IsDriverLoaded: REQUEST_NOP successful. Driver appears to be loaded and responsive." << std::endl;
-        return true;
+    bool final_result = false;
+    if (request_success && NT_SUCCESS(km_status_code)) { // Changed MY_NT_SUCCESS to NT_SUCCESS
+        LogMessage("[+] IsDriverLoaded: REQUEST_NOP successful. Driver appears to be loaded and responsive.");
+        final_result = true;
     } else {
         if (!request_success) {
-            std::wcerr << L"[-] IsDriverLoaded: SubmitRequestAndWait for NOP failed." << std::endl;
+            LogMessage("[-] IsDriverLoaded: SubmitRequestAndWait for NOP failed.");
         }
-        if (!MY_NT_SUCCESS(km_status_code)) {
-            std::wcerr << L"[-] IsDriverLoaded: NOP command failed with KM status: 0x" << std::hex << km_status_code << std::dec << std::endl;
+        if (!NT_SUCCESS(km_status_code)) { // Changed MY_NT_SUCCESS to NT_SUCCESS
+            LogMessageF("[-] IsDriverLoaded: NOP command failed with KM status: 0x%llX", km_status_code);
         }
-        std::wcerr << L"[-] IsDriverLoaded: Driver does not appear to be loaded or responsive." << std::endl;
-        return false;
+        LogMessage("[-] IsDriverLoaded: Driver does not appear to be loaded or responsive.");
+        final_result = false;
     }
+
+    if (was_initialized_by_us) {
+        StealthComm::ShutdownStealthComm();
+        LogMessage("[+] IsDriverLoaded: StealthComm temporarily initialized by us has been shut down.");
+    }
+
+    return final_result;
 }
 
 } // namespace DriverMapper

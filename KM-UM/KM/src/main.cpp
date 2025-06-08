@@ -1103,6 +1103,12 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
     PVOID local_shared_comm_block_um_va = NULL;
     BOOLEAN request_processed_this_cycle = FALSE;
 
+    // --- START: Added for consecutive failure counting ---
+    static UINT consecutive_um_read_failures = 0;
+    const UINT MAX_CONSECUTIVE_UM_READ_FAILURES = 10; // Threshold for giving up
+    KIRQL oldIrql_local; // For use within this function if new lock acquisitions are needed
+    // --- END: Added for consecutive failure counting ---
+
     KeAcquireSpinLock(&g_comm_lock, &oldIrql);
     PWORK_QUEUE_ITEM current_work_item_global_ptr_copy = g_pPollingWorkItem;
     if (!g_km_thread_should_run || !g_target_process || !g_um_shared_comm_block_ptr) {
@@ -1129,10 +1135,45 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
                                    &((SharedCommBlock*)local_shared_comm_block_um_va)->signature,
                                    &signature_from_um,
                                    sizeof(UINT64), &bytes_read_sig);
-    if (!NT_SUCCESS(status_read_sig) || bytes_read_sig != sizeof(UINT64) || signature_from_um != g_km_dynamic_shared_comm_block_signature) {
-        debug_print("[-] KmPollingWorkItemCallback: Failed to read valid signature from UM. ReadSig: 0x%llX, Expected: 0x%llX, Status: 0x%X\n", signature_from_um, g_km_dynamic_shared_comm_block_signature, status_read_sig);
+
+    if (!NT_SUCCESS(status_read_sig) || bytes_read_sig != sizeof(UINT64)) {
+        consecutive_um_read_failures++;
+        debug_print("[-] KmPollingWorkItemCallback: Failed to read signature from UM (Attempt %u/%u). Status: 0x%X, BytesRead: %zu\n",
+                    consecutive_um_read_failures, MAX_CONSECUTIVE_UM_READ_FAILURES, status_read_sig, bytes_read_sig);
+
+        if (consecutive_um_read_failures >= MAX_CONSECUTIVE_UM_READ_FAILURES) {
+            debug_print("[!] KmPollingWorkItemCallback: Max read failures reached. Assuming UM process is dead/unresponsive. Stopping polling.\n");
+            // Use oldIrql_local for this specific lock acquisition if it's different from the main 'oldIrql'
+            // However, since g_comm_lock is the same lock, we can reuse 'oldIrql' if we ensure it's correctly managed.
+            // For clarity and safety, especially if other locks were introduced, a new KIRQL variable is better.
+            // Here, we are modifying global state protected by g_comm_lock.
+            KeAcquireSpinLock(&g_comm_lock, &oldIrql_local); // Acquire lock to modify globals
+            g_km_thread_should_run = FALSE;
+            if (g_target_process == local_handshake_process) {
+                g_target_process = NULL;
+                g_um_shared_comm_block_ptr = NULL;
+            } else {
+                // Log if g_target_process changed mid-flight, but still stop polling.
+                 debug_print("[!] KmPollingWorkItemCallback: g_target_process (0x%p) differs from local_handshake_process (0x%p) during shutdown. Polling stopped.\n", g_target_process, local_handshake_process);
+            }
+            KeReleaseSpinLock(&g_comm_lock, oldIrql_local); // Release lock
+            ObDereferenceObject(local_handshake_process); // Dereference the process
+            return; // Exit callback, do not requeue
+        }
+        // If threshold not reached, fall through to existing error path (deref and requeue)
         ObDereferenceObject(local_handshake_process);
         goto requeue_logic_label;
+    } else if (signature_from_um != g_km_dynamic_shared_comm_block_signature) {
+        // This is a signature mismatch, not a read failure. Treat differently for now.
+        // Could also increment a different counter or lead to shutdown if persistent.
+        debug_print("[-] KmPollingWorkItemCallback: Signature mismatch. ReadSig: 0x%llX, Expected: 0x%llX\n", signature_from_um, g_km_dynamic_shared_comm_block_signature);
+        // Potentially increment consecutive_um_read_failures here as well, or have a separate counter for mismatches.
+        // For this change, we'll keep it separate and requeue.
+        ObDereferenceObject(local_handshake_process);
+        goto requeue_logic_label;
+    } else {
+        // Read was successful and signature matches
+        consecutive_um_read_failures = 0; // Reset counter on success
     }
 
     UINT64 honeypot_value_from_um = 0;
@@ -1142,17 +1183,44 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
                                    &((SharedCommBlock*)local_shared_comm_block_um_va)->honeypot_field,
                                    &honeypot_value_from_um, sizeof(UINT64), &bytes_read_honeypot);
     if (!NT_SUCCESS(status_read_honeypot) || bytes_read_honeypot != sizeof(UINT64)) {
-        debug_print("[-] KmPollingWorkItemCallback: Failed to read honeypot field. Status: 0x%X\n", status_read_honeypot);
+        // This is also a read failure from UM shared memory.
+        consecutive_um_read_failures++;
+        debug_print("[-] KmPollingWorkItemCallback: Failed to read honeypot field (Attempt %u/%u). Status: 0x%X, BytesRead: %zu\n",
+                    consecutive_um_read_failures, MAX_CONSECUTIVE_UM_READ_FAILURES, status_read_honeypot, bytes_read_honeypot);
+
+        if (consecutive_um_read_failures >= MAX_CONSECUTIVE_UM_READ_FAILURES) {
+            debug_print("[!] KmPollingWorkItemCallback: Max read failures (honeypot) reached. Assuming UM dead. Stopping polling.\n");
+            KeAcquireSpinLock(&g_comm_lock, &oldIrql_local);
+            g_km_thread_should_run = FALSE;
+            if (g_target_process == local_handshake_process) {
+                g_target_process = NULL;
+                g_um_shared_comm_block_ptr = NULL;
+            }
+            KeReleaseSpinLock(&g_comm_lock, oldIrql_local);
+            ObDereferenceObject(local_handshake_process);
+            return;
+        }
         ObDereferenceObject(local_handshake_process);
         goto requeue_logic_label;
     }
+    // If honeypot read succeeded, reset counter (as we successfully read some valid part of the block)
+    // However, if the value itself is wrong, it's a more critical, immediate error.
     if (honeypot_value_from_um != EXPECTED_HONEYPOT_VALUE) {
         debug_print("[!] KmPollingWorkItemCallback: Honeypot field mismatch! Expected 0x%llX, Got 0x%llX. Potential tampering. Halting polling.\n", EXPECTED_HONEYPOT_VALUE, honeypot_value_from_um);
-        KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_local); // Use a local KIRQL variable
         g_km_thread_should_run = FALSE;
-        KeReleaseSpinLock(&g_comm_lock, oldIrql);
+        // Consider also clearing g_target_process and g_um_shared_comm_block_ptr here if appropriate for tampering
+        if (g_target_process == local_handshake_process) {
+             g_target_process = NULL;
+             g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_local);
         ObDereferenceObject(local_handshake_process);
-        return;
+        return; // Stop polling immediately on tampering
+    } else {
+        // Honeypot read was successful and value matches, implies UM shared memory is somewhat intact.
+        // Reset counter if other critical reads also succeed.
+        // For now, primary signature read success resets it. This is fine.
     }
 
     NTSTATUS status_read_idx;
@@ -1162,9 +1230,27 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
                                    &obfuscated_km_slot_idx_read,
                                    sizeof(UINT32), &bytes_read_idx);
     if (!NT_SUCCESS(status_read_idx) || bytes_read_idx != sizeof(UINT32)) {
-        debug_print("[-] KmPollingWorkItemCallback: Failed to read obfuscated km_slot_index from UM. Status: 0x%X\n", status_read_idx);
+        consecutive_um_read_failures++;
+        debug_print("[-] KmPollingWorkItemCallback: Failed to read km_slot_index (Attempt %u/%u). Status: 0x%X, BytesRead: %zu\n",
+                    consecutive_um_read_failures, MAX_CONSECUTIVE_UM_READ_FAILURES, status_read_idx, bytes_read_idx);
+        if (consecutive_um_read_failures >= MAX_CONSECUTIVE_UM_READ_FAILURES) {
+            debug_print("[!] KmPollingWorkItemCallback: Max read failures (km_slot_index) reached. Assuming UM dead. Stopping polling.\n");
+            KeAcquireSpinLock(&g_comm_lock, &oldIrql_local);
+            g_km_thread_should_run = FALSE;
+            if (g_target_process == local_handshake_process) {
+                g_target_process = NULL;
+                g_um_shared_comm_block_ptr = NULL;
+            }
+            KeReleaseSpinLock(&g_comm_lock, oldIrql_local);
+            ObDereferenceObject(local_handshake_process);
+            return;
+        }
         ObDereferenceObject(local_handshake_process);
         goto requeue_logic_label;
+    } else {
+        // If slot index read succeeded, this implies good communication.
+        // Resetting the counter here as well could be an option if the signature read alone isn't sufficient.
+        // However, the primary reset is after successful signature validation.
     }
 
     UINT64 sig_km = g_km_dynamic_shared_comm_block_signature;
@@ -1186,9 +1272,28 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
                                    sizeof(SlotStatus), &bytes_read_slot_status);
 
     if (!NT_SUCCESS(status_read_slot_status) || bytes_read_slot_status != sizeof(SlotStatus)) {
-        debug_print("[-] KmPollingWorkItemCallback: Failed to read slot status from UMVA 0x%p. Status: 0x%X\n", current_slot_um_va, status_read_slot_status);
+        consecutive_um_read_failures++;
+        debug_print("[-] KmPollingWorkItemCallback: Failed to read slot status (Attempt %u/%u). UMVA 0x%p. Status: 0x%X, BytesRead: %zu\n",
+                    consecutive_um_read_failures, MAX_CONSECUTIVE_UM_READ_FAILURES, current_slot_um_va, status_read_slot_status, bytes_read_slot_status);
+        if (consecutive_um_read_failures >= MAX_CONSECUTIVE_UM_READ_FAILURES) {
+            debug_print("[!] KmPollingWorkItemCallback: Max read failures (slot_status) reached. Assuming UM dead. Stopping polling.\n");
+            KeAcquireSpinLock(&g_comm_lock, &oldIrql_local);
+            g_km_thread_should_run = FALSE;
+            if (g_target_process == local_handshake_process) {
+                g_target_process = NULL;
+                g_um_shared_comm_block_ptr = NULL;
+            }
+            KeReleaseSpinLock(&g_comm_lock, oldIrql_local);
+            ObDereferenceObject(local_handshake_process);
+            return;
+        }
         ObDereferenceObject(local_handshake_process);
         goto requeue_logic_label;
+    } else {
+        // Successfully read slot status. This is another good sign of communication.
+        // If we consider any successful read from the shared block as "UM is alive",
+        // we could reset consecutive_um_read_failures here too.
+        // For now, the reset is primarily tied to the main signature block success.
     }
 
     if (current_slot_status_from_um == SlotStatus::UM_REQUEST_PENDING) {
