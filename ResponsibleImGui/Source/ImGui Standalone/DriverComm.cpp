@@ -174,4 +174,88 @@ namespace DriverComm {
         return result_addr;
     }
 
+    bool read_memory_buffer(const std::uintptr_t addr, void* buffer, SIZE_T size) {
+        if (DriverComm::g_pid == 0) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::read_memory_buffer: Not attached to any process (PID is 0)." << std::endl;
+            #endif
+            return false;
+        }
+        if (addr == 0) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::read_memory_buffer: Attempted to read from NULL address." << std::endl;
+            #endif
+            return false;
+        }
+        if (!buffer) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::read_memory_buffer: Output buffer is null." << std::endl;
+            #endif
+            return false;
+        }
+        if (size == 0) {
+            return true; // Nothing to read
+        }
+
+        // Directly use StealthComm::ReadMemory for the whole buffer
+        size_t bytes_read = 0;
+        if (!StealthComm::ReadMemory(DriverComm::g_pid, addr, buffer, size, &bytes_read)) {
+            #ifdef _DEBUG
+            // StealthComm::ReadMemory likely logs errors, but high-level one is good.
+            std::cerr << "[-] DriverComm::read_memory_buffer: StealthComm::ReadMemory failed for address 0x" << std::hex << addr << std::dec << ", size " << size << "." << std::endl;
+            #endif
+            return false;
+        }
+        if (bytes_read != size) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::read_memory_buffer: Read size mismatch for address 0x" << std::hex << addr
+                      << std::dec << ". Expected " << size << ", Got " << bytes_read << "." << std::endl;
+            #endif
+            return false; // Partial read is considered a failure for buffer operation
+        }
+        return true;
+    }
+
+    bool write_memory_buffer(const std::uintptr_t addr, const void* buffer, SIZE_T size) {
+        if (DriverComm::g_pid == 0) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::write_memory_buffer: Not attached to any process (PID is 0)." << std::endl;
+            #endif
+            return false;
+        }
+        if (addr == 0) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::write_memory_buffer: Attempted to write to NULL address." << std::endl;
+            #endif
+            return false;
+        }
+        if (!buffer) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::write_memory_buffer: Input buffer is null." << std::endl;
+            #endif
+            return false;
+        }
+        if (size == 0) {
+            return true; // Nothing to write
+        }
+
+        // Directly use StealthComm::WriteMemory for the whole buffer
+        size_t bytes_written = 0;
+        if (!StealthComm::WriteMemory(DriverComm::g_pid, addr, buffer, size, &bytes_written)) {
+            #ifdef _DEBUG
+            // StealthComm::WriteMemory likely logs errors.
+            std::cerr << "[-] DriverComm::write_memory_buffer: StealthComm::WriteMemory failed for address 0x" << std::hex << addr << std::dec << ", size " << size << "." << std::endl;
+            #endif
+            return false;
+        }
+        if (bytes_written != size) {
+            #ifdef _DEBUG
+            std::cerr << "[-] DriverComm::write_memory_buffer: Write size mismatch for address 0x" << std::hex << addr
+                      << std::dec << ". Expected " << size << ", Wrote " << bytes_written << "." << std::endl;
+            #endif
+            return false; // Partial write is considered a failure
+        }
+        return true;
+    }
+
 } // namespace DriverComm
