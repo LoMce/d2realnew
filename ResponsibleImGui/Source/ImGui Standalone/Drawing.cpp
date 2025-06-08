@@ -988,6 +988,29 @@ void Drawing::Draw() {
             LogMessage("[+] FlyThread joined.");
         }
 
+        if(isInitialized && g_current_pid_drawing != 0) { // Check if already initialized
+            LogMessage("[+] Sending disconnect command to KM driver...");
+            uint64_t km_status_code = 0;
+            uint8_t dummy_output[1]; // No real output expected
+            uint32_t output_size = 0;
+            // Use g_current_pid_drawing as the target_pid for this command,
+            // as it's a command to the driver about this UM instance.
+            StealthComm::SubmitRequestAndWait(
+                StealthComm::CommCommand::REQUEST_DISCONNECT,
+                static_cast<uint64_t>(g_current_pid_drawing),
+                nullptr, 0, // No parameters for disconnect
+                dummy_output, output_size,
+                km_status_code,
+                1000 // Short timeout, fire and forget
+            );
+            if (MY_NT_SUCCESS(km_status_code)) {
+                LogMessage("[+] Disconnect command acknowledged by KM (or sent).");
+            } else {
+                LogMessageF("[-] Disconnect command to KM failed or timed out. Status: 0x%llX", km_status_code);
+            }
+            // Proceed with DriverComm::shutdown() regardless of disconnect ack,
+            // as we are exiting anyway.
+        }
         if(isInitialized && g_current_pid_drawing != 0) {
              LogMessage("[+] Shutting down DriverComm before exit...");
              DriverComm::shutdown();

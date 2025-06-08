@@ -23,6 +23,7 @@ enum class CommCommand : uint32_t {
     REQUEST_GET_MODULE_BASE,
     REQUEST_AOB_SCAN,
     REQUEST_ALLOCATE_MEMORY,
+    REQUEST_DISCONNECT, // Added for clean disconnect
 };
 
 enum class SlotStatus : uint32_t {

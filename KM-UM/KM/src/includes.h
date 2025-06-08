@@ -3,6 +3,12 @@
 #include <windef.h>
 #include <stdint.h>
 
+// New IOCTL for driver unload
+// Using METHOD_NEITHER and FILE_ANY_ACCESS is typical for simple trigger IOCTLs
+// that don't transfer data and can be called by a privileged user.
+// Function code 0x902 should be unique within this driver's IOCTLs.
+#define IOCTL_REQUEST_UNLOAD_DRIVER CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_NEITHER, FILE_ANY_ACCESS)
+
 #ifndef MEM_IMAGE
 #define MEM_IMAGE    0x1000000
 #endif
