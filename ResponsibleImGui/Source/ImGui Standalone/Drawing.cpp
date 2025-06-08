@@ -63,6 +63,308 @@ void AsyncInitializeSignaturesAndBytes_ThreadFunc(uintptr_t moduleBase, DWORD pr
     Features::g_aob_scan_running = false;
 }
 
+// New function to disable and clean up all features
+static void DisableAndCleanupAllFeatures(DWORD pid_param) {
+    LogMessage("----------------------------------------------------------");
+    LogMessageF("[+] DisableAndCleanupAllFeatures: Starting cleanup for PID %lu...", pid_param);
+
+    // --- Disable Features, Restore Bytes, Free Memory ---
+
+    // Killaura
+    if (Killaura::Enabled && Killaura::InstructionAddress.load() != 0) {
+        if (Killaura::mem_allocated && Killaura::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Killaura::InstructionAddress.load(), Killaura::origBytes, sizeof(Killaura::origBytes));
+            Features::ReleaseCodecave(pid_param, Killaura::memAllocatedAddress, Killaura::mem_allocated);
+            LogMessage("[-] Killaura disabled, bytes restored, codecave released.");
+        } else if (Killaura::InstructionAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Killaura::InstructionAddress.load(), Killaura::origBytes, sizeof(Killaura::origBytes));
+            LogMessage("[-] Killaura disabled, bytes restored (no codecave).");
+        }
+        Killaura::Enabled = false;
+    }
+
+    // Ghostmode
+    if (Ghostmode::Enabled && Ghostmode::InstructionAddress.load() != 0) {
+        if (Ghostmode::mem_allocated && Ghostmode::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Ghostmode::InstructionAddress.load(), Ghostmode::origBytes, sizeof(Ghostmode::origBytes));
+            Features::ReleaseCodecave(pid_param, Ghostmode::memAllocatedAddress, Ghostmode::mem_allocated);
+            LogMessage("[-] Ghostmode disabled, bytes restored, codecave released.");
+        }
+        Ghostmode::Enabled = false;
+    }
+
+    // Godmode
+    if (Godmode::Enabled && Godmode::InstructionAddress.load() != 0) {
+        if (Godmode::mem_allocated && Godmode::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Godmode::InstructionAddress.load(), Godmode::origBytes, sizeof(Godmode::origBytes));
+            Features::ReleaseCodecave(pid_param, Godmode::memAllocatedAddress, Godmode::mem_allocated);
+            LogMessage("[-] Godmode disabled, bytes restored, codecave released.");
+        }
+        Godmode::Enabled = false;
+    }
+
+    // dmgMult
+    if (dmgMult::Enabled && dmgMult::InstructionAddress.load() != 0) {
+        if (dmgMult::mem_allocated && dmgMult::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(dmgMult::InstructionAddress.load(), dmgMult::origBytes, sizeof(dmgMult::origBytes));
+            Features::ReleaseCodecave(pid_param, dmgMult::memAllocatedAddress, dmgMult::mem_allocated);
+            LogMessage("[-] dmgMult disabled, bytes restored, codecave released.");
+        }
+        dmgMult::Enabled = false;
+    }
+
+    // RPM
+    if (RPM::Enabled && RPM::InstructionAddress.load() != 0) {
+        if (RPM::mem_allocated && RPM::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(RPM::InstructionAddress.load(), RPM::origBytes, sizeof(RPM::origBytes));
+            Features::ReleaseCodecave(pid_param, RPM::memAllocatedAddress, RPM::mem_allocated);
+            LogMessage("[-] RPM disabled, bytes restored, codecave released.");
+        }
+        RPM::Enabled = false;
+    }
+
+    // NoRecoil
+    if (NoRecoil::Enabled && NoRecoil::InstructionAddress.load() != 0) {
+        if (NoRecoil::mem_allocated && NoRecoil::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(NoRecoil::InstructionAddress.load(), NoRecoil::origBytes, sizeof(NoRecoil::origBytes));
+            Features::ReleaseCodecave(pid_param, NoRecoil::memAllocatedAddress, NoRecoil::mem_allocated);
+            LogMessage("[-] NoRecoil disabled, bytes restored, codecave released.");
+        }
+        NoRecoil::Enabled = false;
+    }
+
+    // OHK
+    if (OHK::Enabled && OHK::InstructionAddress.load() != 0) {
+        if (OHK::mem_allocated && OHK::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(OHK::InstructionAddress.load(), OHK::origBytes, sizeof(OHK::origBytes));
+            Features::ReleaseCodecave(pid_param, OHK::memAllocatedAddress, OHK::mem_allocated);
+            LogMessage("[-] OHK disabled, bytes restored, codecave released.");
+        }
+        OHK::Enabled = false;
+    }
+
+    // InfStacks
+    if (InfStacks::Enabled && InfStacks::InstructionAddress.load() != 0) {
+        if (InfStacks::mem_allocated && InfStacks::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(InfStacks::InstructionAddress.load(), InfStacks::origBytes, sizeof(InfStacks::origBytes));
+            Features::ReleaseCodecave(pid_param, InfStacks::memAllocatedAddress, InfStacks::mem_allocated);
+            LogMessage("[-] InfStacks disabled, bytes restored, codecave released.");
+        }
+        InfStacks::Enabled = false;
+    }
+
+    // Chams
+    if (Chams::Enabled && Chams::InstructionAddress.load() != 0) {
+        if (Chams::mem_allocated && Chams::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Chams::InstructionAddress.load(), Chams::origBytes, sizeof(Chams::origBytes));
+            Features::ReleaseCodecave(pid_param, Chams::memAllocatedAddress, Chams::mem_allocated);
+            LogMessage("[-] Chams disabled, bytes restored, codecave released.");
+        }
+        Chams::Enabled = false;
+    }
+
+    // InstantInteract
+    if (InstantInteract::Enabled && InstantInteract::InstructionAddress.load() != 0) {
+        if (InstantInteract::mem_allocated && InstantInteract::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(InstantInteract::InstructionAddress.load(), InstantInteract::origBytes, sizeof(InstantInteract::origBytes));
+            Features::ReleaseCodecave(pid_param, InstantInteract::memAllocatedAddress, InstantInteract::mem_allocated);
+            LogMessage("[-] InstantInteract disabled, bytes restored, codecave released.");
+        }
+        InstantInteract::Enabled = false;
+    }
+
+    // ImmuneAura
+    if (ImmuneAura::Enabled && ImmuneAura::InstructionAddress.load() != 0) {
+        if (ImmuneAura::mem_allocated && ImmuneAura::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(ImmuneAura::InstructionAddress.load(), ImmuneAura::origBytes, sizeof(ImmuneAura::origBytes));
+            Features::ReleaseCodecave(pid_param, ImmuneAura::memAllocatedAddress, ImmuneAura::mem_allocated);
+            LogMessage("[-] ImmuneAura disabled, bytes restored, codecave released.");
+        }
+        ImmuneAura::Enabled = false;
+    }
+
+    // Mag999
+    if (Mag999::Enabled && Mag999::InstructionAddress.load() != 0) {
+        if (Mag999::mem_allocated && Mag999::memAllocatedAddress.load() != 0) {
+            DriverComm::write_memory_buffer(Mag999::InstructionAddress.load(), Mag999::origBytes, sizeof(Mag999::origBytes));
+            Features::ReleaseCodecave(pid_param, Mag999::memAllocatedAddress, Mag999::mem_allocated);
+            LogMessage("[-] Mag999 disabled, bytes restored, codecave released.");
+        }
+        Mag999::Enabled = false;
+    }
+
+    // InfAmmo & InfSwordAmmo
+    if (InfAmmo::Enabled) {
+        if (InfAmmo::InstructionAddress.load() != 0 && InfAmmo::mem_allocated) {
+            DriverComm::write_memory_buffer(InfAmmo::InstructionAddress.load(), InfAmmo::origBytes, sizeof(InfAmmo::origBytes));
+            Features::ReleaseCodecave(pid_param, InfAmmo::memAllocatedAddress, InfAmmo::mem_allocated);
+            LogMessage("[-] InfAmmo main hook disabled, bytes restored, codecave released.");
+        }
+        if (InfSwordAmmo::InstructionAddress.load() != 0) {
+            DriverComm::write_memory_buffer(InfSwordAmmo::InstructionAddress.load(), InfSwordAmmo::origBytes, sizeof(InfSwordAmmo::origBytes));
+            LogMessage("[-] InfSwordAmmo NOPs restored.");
+        }
+        InfAmmo::Enabled = false;
+    }
+
+    // InstaRespawn & RespawnAnywhere
+    if (InstaRespawn::Enabled) {
+        if (InstaRespawn::InstructionAddress.load() != 0) {
+            DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress.load(), InstaRespawn::origBytes, sizeof(InstaRespawn::origBytes));
+            LogMessage("[-] InstaRespawn direct patch restored.");
+        }
+        if (RespawnAnywhere::InstructionAddress.load() != 0 && RespawnAnywhere::mem_allocated) {
+            DriverComm::write_memory_buffer(RespawnAnywhere::InstructionAddress.load(), RespawnAnywhere::origBytes, sizeof(RespawnAnywhere::origBytes));
+            Features::ReleaseCodecave(pid_param, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated);
+            LogMessage("[-] RespawnAnywhere hook disabled, bytes restored, codecave released.");
+        }
+        InstaRespawn::Enabled = false;
+    }
+
+    // InteractThruWalls
+    if (InteractThruWalls::Enabled) {
+        if (InteractThruWalls::InstructionAddress1.load() != 0 && InteractThruWalls::mem_allocated1) {
+            DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress1.load(), InteractThruWalls::origBytes1, sizeof(InteractThruWalls::origBytes1));
+            Features::ReleaseCodecave(pid_param, InteractThruWalls::memAllocatedAddress1, InteractThruWalls::mem_allocated1);
+            LogMessage("[-] InteractThruWalls Hook 1 disabled, bytes restored, codecave released.");
+        }
+        if (InteractThruWalls::InstructionAddress2.load() != 0 && InteractThruWalls::mem_allocated2) {
+            DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress2.load(), InteractThruWalls::origBytes2, sizeof(InteractThruWalls::origBytes2));
+            Features::ReleaseCodecave(pid_param, InteractThruWalls::memAllocatedAddress2, InteractThruWalls::mem_allocated2);
+            LogMessage("[-] InteractThruWalls Hook 2 disabled, bytes restored, codecave released.");
+        }
+        InteractThruWalls::Enabled = false;
+    }
+
+    // AbilityCharge
+    if (AbilityCharge::Enabled && AbilityCharge::InstructionAddress.load() != 0) {
+        // Assuming PollAbilityCharge handles restoration if key is up.
+        // For shutdown, explicitly restore if address is known.
+        DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress.load(), AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes));
+        if (AbilityCharge::memAllocatedAddress.load() != 0) { // Check if cave was used
+             // Call ReleaseCodecave if AbilityCharge has its own mem_allocated flag and it's true
+             // Features::ReleaseCodecave(pid_param, AbilityCharge::memAllocatedAddress, AbilityCharge::ability_charge_mem_allocated_flag);
+            LogMessage("[-] AbilityCharge hook bytes restored. Cave release depends on specific management.");
+        } else {
+            LogMessage("[-] AbilityCharge hook bytes restored (no specific cave address).");
+        }
+        AbilityCharge::Enabled = false;
+    }
+
+    // LocalPlayer and ViewAngles
+    if (LocalPlayer::Enabled) {
+        if (LocalPlayer::InstructionAddress.load() != 0 && LocalPlayer::mem_allocated) {
+            DriverComm::write_memory_buffer(LocalPlayer::InstructionAddress.load(), LocalPlayer::origBytes, sizeof(LocalPlayer::origBytes));
+            Features::ReleaseCodecave(pid_param, LocalPlayer::memAllocatedAddress, LocalPlayer::mem_allocated);
+        }
+        if (Features::LocalPlayer::flyEnabled && LocalPlayer::disableGravAddress.load() != 0 && LocalPlayer::disableGrav_mem_allocated) {
+             DriverComm::write_memory_buffer(LocalPlayer::disableGravAddress.load(), LocalPlayer::disableGravOrigBytes, sizeof(LocalPlayer::disableGravOrigBytes));
+             Features::ReleaseCodecave(pid_param, LocalPlayer::disableGravMemAllocatedAddress, LocalPlayer::disableGrav_mem_allocated);
+             LogMessage("[-] Fly (gravity part) disabled, bytes restored, codecave released.");
+        }
+        if (LocalPlayer::addrMemAllocatedAddress.load() != 0 && LocalPlayer::addr_mem_allocated) {
+            DriverComm::free_memory_ex(pid_param, LocalPlayer::addrMemAllocatedAddress.load(), 0);
+            LocalPlayer::addrMemAllocatedAddress.store(0);
+            LocalPlayer::addr_mem_allocated = false;
+        }
+        LocalPlayer::Enabled = false;
+        LogMessage("[-] LocalPlayer related features disabled, memory freed.");
+    }
+    // ViewAngles cleanup
+    DisableViewAngleHook();
+    if (ViewAngles::addrMemAllocatedAddress.load() != 0 && ViewAngles::addr_mem_allocated) {
+        DriverComm::free_memory_ex(pid_param, ViewAngles::addrMemAllocatedAddress.load(), 0);
+        ViewAngles::addrMemAllocatedAddress.store(0);
+        ViewAngles::addr_mem_allocated = false;
+        LogMessage("[-] ViewAngles addrMemAllocatedAddress freed.");
+    }
+    ViewAngles::Enabled = false;
+
+    // ActivityLoader
+    if (ActivityLoader::Enabled) {
+        if (ActivityLoader::InstructionAddress.load() != 0 && ActivityLoader::mem_allocated) {
+            DriverComm::write_memory_buffer(ActivityLoader::InstructionAddress.load(), ActivityLoader::origBytes, sizeof(ActivityLoader::origBytes));
+            Features::ReleaseCodecave(pid_param, ActivityLoader::memAllocatedAddress, ActivityLoader::mem_allocated);
+        }
+        if (ActivityLoader::addrMemAllocatedAddress.load() != 0 && ActivityLoader::addr_mem_allocated) {
+            DriverComm::free_memory_ex(pid_param, ActivityLoader::addrMemAllocatedAddress.load(), 0);
+            ActivityLoader::addrMemAllocatedAddress.store(0);
+            ActivityLoader::addr_mem_allocated = false;
+        }
+        ActivityLoader::Enabled = false;
+        LogMessage("[-] ActivityLoader disabled, memory freed.");
+    }
+
+    // Simple NOP/Byte Patch Features (Restoration)
+    if (NoJoinAllies::Enabled && NoJoinAllies::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(NoJoinAllies::InstructionAddress.load(), NoJoinAllies::origBytes, sizeof(NoJoinAllies::origBytes)); NoJoinAllies::Enabled = false; LogMessage("[-] NoJoinAllies disabled."); }
+    if (NoTurnBack::Enabled && NoTurnBack::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(NoTurnBack::InstructionAddress.load(), NoTurnBack::origBytes, sizeof(NoTurnBack::origBytes)); NoTurnBack::Enabled = false; LogMessage("[-] NoTurnBack disabled."); }
+    if (SparrowAnywhere::Enabled && SparrowAnywhere::InstructionAddress.load() != 0) { DriverComm::write_memory(SparrowAnywhere::InstructionAddress.load(), SparrowAnywhere::origByte); SparrowAnywhere::Enabled = false; LogMessage("[-] SparrowAnywhere disabled."); }
+    if (NoRezTokens::Enabled && NoRezTokens::InstructionAddress.load() != 0) { DriverComm::write_memory(NoRezTokens::InstructionAddress.load(), NoRezTokens::origByte); NoRezTokens::Enabled = false; LogMessage("[-] NoRezTokens disabled."); }
+    if (ShootThru::Enabled && ShootThru::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(ShootThru::InstructionAddress.load(), ShootThru::origBytes, sizeof(ShootThru::origBytes)); ShootThru::Enabled = false; LogMessage("[-] ShootThruWalls disabled."); }
+    if (IcarusDash::Enabled && IcarusDash::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(IcarusDash::InstructionAddress.load(), IcarusDash::origBytes, sizeof(IcarusDash::origBytes)); IcarusDash::Enabled = false; LogMessage("[-] IcarusDash disabled."); }
+    if (LobbyCrasher::Enabled && LobbyCrasher::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(LobbyCrasher::InstructionAddress.load(), LobbyCrasher::origBytes, sizeof(LobbyCrasher::origBytes)); LobbyCrasher::Enabled = false; LogMessage("[-] LobbyCrasher disabled."); }
+    if (Oxygen::Enabled && Oxygen::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(Oxygen::InstructionAddress.load(), Oxygen::origBytes, sizeof(Oxygen::origBytes)); Oxygen::Enabled = false; LogMessage("[-] Oxygen disabled."); }
+    if (InfSparrowBoost::Enabled && InfSparrowBoost::InstructionAddress.load() != 0) { DriverComm::write_memory(InfSparrowBoost::InstructionAddress.load(), InfSparrowBoost::origByte); InfSparrowBoost::Enabled = false; LogMessage("[-] InfSparrowBoost disabled."); }
+    if (InfBuffTimers::Enabled && InfBuffTimers::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(InfBuffTimers::InstructionAddress.load(), InfBuffTimers::origBytes, sizeof(InfBuffTimers::origBytes)); InfBuffTimers::Enabled = false; LogMessage("[-] InfBuffTimers disabled."); }
+    if (InfExoticBuffTimers::Enabled && InfExoticBuffTimers::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(InfExoticBuffTimers::InstructionAddress.load(), InfExoticBuffTimers::origBytes, sizeof(InfExoticBuffTimers::origBytes)); InfExoticBuffTimers::Enabled = false; LogMessage("[-] InfExoticBuffTimers disabled."); }
+    if (AntiFlinch::Enabled) {
+        if(AntiFlinch::InstructionAddress1.load() != 0) DriverComm::write_memory_buffer(AntiFlinch::InstructionAddress1.load(), AntiFlinch::origBytes1, sizeof(AntiFlinch::origBytes1));
+        if(AntiFlinch::InstructionAddress2.load() != 0) DriverComm::write_memory_buffer(AntiFlinch::InstructionAddress2.load(), AntiFlinch::origBytes2, sizeof(AntiFlinch::origBytes2));
+        if(AntiFlinch::InstructionAddress3.load() != 0) DriverComm::write_memory_buffer(AntiFlinch::InstructionAddress3.load(), AntiFlinch::origBytes3, sizeof(AntiFlinch::origBytes3));
+        AntiFlinch::Enabled = false; LogMessage("[-] AntiFlinch disabled.");
+    }
+    if (GameSpeed::Enabled && GameSpeed::Address.load() != 0 && GameSpeed::WasKeyDown) {
+        DriverComm::write_memory(GameSpeed::Address.load(), GameSpeed::NormalValue);
+        LogMessage("[-] GameSpeed restored to normal.");
+    }
+    GameSpeed::Enabled = false; GameSpeed::WasKeyDown = false;
+
+    if (ImmuneBosses::Enabled.load() && ImmuneBosses::Address.load() != 0) {
+        float one = 1.0f; DriverComm::write_memory(ImmuneBosses::Address.load(), one);
+        LogMessage("[-] ImmuneBosses restored to normal.");
+    }
+    ImmuneBosses::Enabled.store(false);
+
+    // --- Stop and Join Threads ---
+    if (Features::LocalPlayer::flyEnabled) {
+         Features::LocalPlayer::flyEnabled = false;
+    }
+    StopFlyThread = true;
+    if (FlyThread.joinable()) {
+        LogMessage("[+] Joining FlyThread...");
+        FlyThread.join();
+        LogMessage("[+] FlyThread joined.");
+    } else {
+        LogMessage("[!] FlyThread was not joinable (already joined or not started).");
+    }
+
+    ImmuneBosses::Enabled.store(false);
+    ImmuneBosses::ThreadRunning.store(false);
+    if (ImmuneBossesThread.joinable()) {
+        LogMessage("[+] Joining ImmuneBossesThread...");
+        ImmuneBossesThread.join();
+        LogMessage("[+] ImmuneBossesThread joined.");
+    } else {
+        LogMessage("[!] ImmuneBossesThread was not joinable (already joined or not started).");
+    }
+
+    g_FindPlayerEnabled = false;
+    g_StopFindThread = true;
+    if (g_FindPlayerThread.joinable()) {
+        LogMessage("[+] Joining g_FindPlayerThread (AutoFindPlayerLoop)...");
+        g_FindPlayerThread.join();
+        LogMessage("[+] g_FindPlayerThread joined.");
+    } else {
+        LogMessage("[!] g_FindPlayerThread was not joinable (already joined or not started).");
+    }
+
+    ViewAngles::g_cacheThreadRunning.store(false);
+    LogMessage("[+] ViewAngles::CacheLoop signaled to stop (detached thread, cannot join).");
+
+    LogMessage("[+] DisableAndCleanupAllFeatures: Feature cleanup and thread processing complete.");
+    LogMessage("----------------------------------------------------------");
+}
+
 
 
 // Global instruction toggles
@@ -1065,10 +1367,21 @@ void Drawing::Draw() {
                 wcstombs_s(&convertedChars, narrowModuleName, sizeof(narrowModuleName), g_wModuleName.c_str(), _TRUNCATE);
                 LogMessageF("[!] Drawing::Draw: Target process %s (PID: %lu) lost. Resetting.", narrowModuleName, g_current_pid_drawing);
 
-                if(isInitialized) { // Only shutdown if it was initialized
-                     LogMessage("[+] Shutting down DriverComm due to process loss...");
+                DWORD pid_on_loss = g_current_pid_drawing; // Capture PID before it's reset
+
+                // Call the centralized cleanup function BEFORE resetting globals like g_current_pid_drawing
+                // and before DriverComm::shutdown() if that function relies on the PID.
+                // DisableAndCleanupAllFeatures will handle logging its actions.
+                if (isInitialized && pid_on_loss != 0) { // Ensure we had a valid PID and were initialized
+                    DisableAndCleanupAllFeatures(pid_on_loss);
+                }
+
+                if(isInitialized) { // This check might be redundant if DisableAndCleanupAllFeatures handles DriverComm::shutdown
+                                     // but kept for safety to ensure driver comms are attempted to be closed.
+                                     // DriverComm::shutdown() should be safe to call multiple times or if already shutdown.
+                     LogMessage("[+] Ensuring DriverComm is shut down due to process loss (called from Draw)...");
                      DriverComm::shutdown(); // This will also reset DriverComm::g_pid
-                     LogMessage("[+] DriverComm shut down.");
+                     LogMessage("[+] DriverComm shut down after process loss (called from Draw).");
                 }
 
                 // Signal and join ImmuneBossesThread
@@ -1320,333 +1633,29 @@ void Drawing::Draw() {
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.7f, 0.1f, 0.1f, 1.0f));
     if (ImGui::Button("X", ImVec2(xButtonSize, xButtonSize))) {
         LogMessage("----------------------------------------------------------");
-        LogMessage("[+] Application exit requested by user. Cleaning up features...");
+        LogMessage("[+] Application exit requested by user via X button.");
 
-        // --- Disable Features, Restore Bytes, Free Memory ---
-        // Iterate through features as defined in Features.h and handled in UpdateFeatureStates
+        DisableAndCleanupAllFeatures(g_current_pid_drawing); // Call the new centralized cleanup function
 
-        // Killaura
-        if (Killaura::Enabled && Killaura::InstructionAddress.load() != 0) {
-            if (Killaura::mem_allocated && Killaura::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(Killaura::InstructionAddress.load(), Killaura::origBytes, sizeof(Killaura::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, Killaura::memAllocatedAddress, Killaura::mem_allocated);
-                LogMessage("[-] Killaura disabled, bytes restored, codecave released during shutdown.");
-            } else if (Killaura::InstructionAddress.load() != 0) { // If not cave based but address known (e.g. direct patch not using full cave logic)
-                 // This case might not apply if all shellcode features use InjectCodecave correctly.
-                 // For safety, if it was enabled and had an address but no cave, try restoring.
-                DriverComm::write_memory_buffer(Killaura::InstructionAddress.load(), Killaura::origBytes, sizeof(Killaura::origBytes));
-                LogMessage("[-] Killaura disabled, bytes restored (no codecave) during shutdown.");
-            }
-            Killaura::Enabled = false;
+        // --- Existing Shutdown for Driver and UI ---
+        // Note: DriverComm::shutdown() is now called within DisableAndCleanupAllFeatures if pid is valid.
+        // However, to ensure it's called even if pid was 0 at the time DisableAndCleanupAllFeatures was invoked,
+        // or if DisableAndCleanupAllFeatures might not cover all shutdown scenarios for DriverComm,
+        // it's safer to call it here as well, if isInitialized suggests it was active.
+        if(isInitialized && g_current_pid_drawing != 0) { // Check g_current_pid_drawing to ensure it was valid
+            LogMessage("[+] Ensuring DriverComm is shut down (called from X button)...");
+            DriverComm::shutdown();
+            LogMessage("[+] DriverComm shut down (called from X button).");
         }
-
-        // Ghostmode
-        if (Ghostmode::Enabled && Ghostmode::InstructionAddress.load() != 0) {
-            if (Ghostmode::mem_allocated && Ghostmode::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(Ghostmode::InstructionAddress.load(), Ghostmode::origBytes, sizeof(Ghostmode::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, Ghostmode::memAllocatedAddress, Ghostmode::mem_allocated);
-                LogMessage("[-] Ghostmode disabled, bytes restored, codecave released during shutdown.");
-            }
-            Ghostmode::Enabled = false;
-        }
-
-        // Godmode
-        if (Godmode::Enabled && Godmode::InstructionAddress.load() != 0) {
-            if (Godmode::mem_allocated && Godmode::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(Godmode::InstructionAddress.load(), Godmode::origBytes, sizeof(Godmode::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, Godmode::memAllocatedAddress, Godmode::mem_allocated);
-                LogMessage("[-] Godmode disabled, bytes restored, codecave released during shutdown.");
-            }
-            Godmode::Enabled = false;
-        }
-
-        // dmgMult
-        if (dmgMult::Enabled && dmgMult::InstructionAddress.load() != 0) {
-            if (dmgMult::mem_allocated && dmgMult::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(dmgMult::InstructionAddress.load(), dmgMult::origBytes, sizeof(dmgMult::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, dmgMult::memAllocatedAddress, dmgMult::mem_allocated);
-                LogMessage("[-] dmgMult disabled, bytes restored, codecave released during shutdown.");
-            }
-            dmgMult::Enabled = false;
-        }
-
-        // RPM
-        if (RPM::Enabled && RPM::InstructionAddress.load() != 0) {
-            if (RPM::mem_allocated && RPM::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(RPM::InstructionAddress.load(), RPM::origBytes, sizeof(RPM::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, RPM::memAllocatedAddress, RPM::mem_allocated);
-                LogMessage("[-] RPM disabled, bytes restored, codecave released during shutdown.");
-            }
-            RPM::Enabled = false;
-        }
-
-        // NoRecoil
-        if (NoRecoil::Enabled && NoRecoil::InstructionAddress.load() != 0) {
-            if (NoRecoil::mem_allocated && NoRecoil::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(NoRecoil::InstructionAddress.load(), NoRecoil::origBytes, sizeof(NoRecoil::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, NoRecoil::memAllocatedAddress, NoRecoil::mem_allocated);
-                LogMessage("[-] NoRecoil disabled, bytes restored, codecave released during shutdown.");
-            }
-            NoRecoil::Enabled = false;
-        }
-
-        // OHK
-        if (OHK::Enabled && OHK::InstructionAddress.load() != 0) {
-            if (OHK::mem_allocated && OHK::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(OHK::InstructionAddress.load(), OHK::origBytes, sizeof(OHK::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, OHK::memAllocatedAddress, OHK::mem_allocated);
-                LogMessage("[-] OHK disabled, bytes restored, codecave released during shutdown.");
-            }
-            OHK::Enabled = false;
-        }
-
-        // InfStacks
-        if (InfStacks::Enabled && InfStacks::InstructionAddress.load() != 0) {
-            if (InfStacks::mem_allocated && InfStacks::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(InfStacks::InstructionAddress.load(), InfStacks::origBytes, sizeof(InfStacks::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, InfStacks::memAllocatedAddress, InfStacks::mem_allocated);
-                LogMessage("[-] InfStacks disabled, bytes restored, codecave released during shutdown.");
-            }
-            InfStacks::Enabled = false;
-        }
-
-        // Chams
-        if (Chams::Enabled && Chams::InstructionAddress.load() != 0) {
-            if (Chams::mem_allocated && Chams::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(Chams::InstructionAddress.load(), Chams::origBytes, sizeof(Chams::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, Chams::memAllocatedAddress, Chams::mem_allocated);
-                LogMessage("[-] Chams disabled, bytes restored, codecave released during shutdown.");
-            }
-            Chams::Enabled = false;
-        }
-
-        // InstantInteract
-        if (InstantInteract::Enabled && InstantInteract::InstructionAddress.load() != 0) {
-            if (InstantInteract::mem_allocated && InstantInteract::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(InstantInteract::InstructionAddress.load(), InstantInteract::origBytes, sizeof(InstantInteract::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, InstantInteract::memAllocatedAddress, InstantInteract::mem_allocated);
-                LogMessage("[-] InstantInteract disabled, bytes restored, codecave released during shutdown.");
-            }
-            InstantInteract::Enabled = false;
-        }
-
-        // ImmuneAura
-        if (ImmuneAura::Enabled && ImmuneAura::InstructionAddress.load() != 0) {
-            if (ImmuneAura::mem_allocated && ImmuneAura::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(ImmuneAura::InstructionAddress.load(), ImmuneAura::origBytes, sizeof(ImmuneAura::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, ImmuneAura::memAllocatedAddress, ImmuneAura::mem_allocated);
-                LogMessage("[-] ImmuneAura disabled, bytes restored, codecave released during shutdown.");
-            }
-            ImmuneAura::Enabled = false;
-        }
-
-        // Mag999
-        if (Mag999::Enabled && Mag999::InstructionAddress.load() != 0) {
-            if (Mag999::mem_allocated && Mag999::memAllocatedAddress.load() != 0) {
-                DriverComm::write_memory_buffer(Mag999::InstructionAddress.load(), Mag999::origBytes, sizeof(Mag999::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, Mag999::memAllocatedAddress, Mag999::mem_allocated);
-                LogMessage("[-] Mag999 disabled, bytes restored, codecave released during shutdown.");
-            }
-            Mag999::Enabled = false;
-        }
-
-        // InfAmmo (composite: main hook + InfSwordAmmo NOP)
-        if (InfAmmo::Enabled) {
-            if (InfAmmo::InstructionAddress.load() != 0 && InfAmmo::mem_allocated) {
-                DriverComm::write_memory_buffer(InfAmmo::InstructionAddress.load(), InfAmmo::origBytes, sizeof(InfAmmo::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, InfAmmo::memAllocatedAddress, InfAmmo::mem_allocated);
-                LogMessage("[-] InfAmmo main hook disabled, bytes restored, codecave released during shutdown.");
-            }
-            if (InfSwordAmmo::InstructionAddress.load() != 0) { // Restore regardless of InfAmmo::mem_allocated as it's a direct patch
-                DriverComm::write_memory(InfSwordAmmo::InstructionAddress.load(), InfSwordAmmo::origBytes);
-                LogMessage("[-] InfSwordAmmo NOPs restored during shutdown.");
-            }
-            InfAmmo::Enabled = false;
-        }
-
-        // InstaRespawn (composite: direct patch + RespawnAnywhere shellcode)
-        if (InstaRespawn::Enabled) {
-            if (InstaRespawn::InstructionAddress.load() != 0) {
-                DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress.load(), InstaRespawn::origBytes, sizeof(InstaRespawn::origBytes));
-                LogMessage("[-] InstaRespawn direct patch restored during shutdown.");
-            }
-            if (RespawnAnywhere::InstructionAddress.load() != 0 && RespawnAnywhere::mem_allocated) {
-                DriverComm::write_memory_buffer(RespawnAnywhere::InstructionAddress.load(), RespawnAnywhere::origBytes, sizeof(RespawnAnywhere::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated);
-                LogMessage("[-] RespawnAnywhere hook disabled, bytes restored, codecave released during shutdown.");
-            }
-            InstaRespawn::Enabled = false;
-        }
-
-        // InteractThruWalls (composite: two shellcode hooks)
-        if (InteractThruWalls::Enabled) {
-            if (InteractThruWalls::InstructionAddress1.load() != 0 && InteractThruWalls::mem_allocated1) {
-                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress1.load(), InteractThruWalls::origBytes1, sizeof(InteractThruWalls::origBytes1));
-                Features::ReleaseCodecave(g_current_pid_drawing, InteractThruWalls::memAllocatedAddress1, InteractThruWalls::mem_allocated1);
-                LogMessage("[-] InteractThruWalls Hook 1 disabled, bytes restored, codecave released during shutdown.");
-            }
-            if (InteractThruWalls::InstructionAddress2.load() != 0 && InteractThruWalls::mem_allocated2) {
-                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress2.load(), InteractThruWalls::origBytes2, sizeof(InteractThruWalls::origBytes2));
-                Features::ReleaseCodecave(g_current_pid_drawing, InteractThruWalls::memAllocatedAddress2, InteractThruWalls::mem_allocated2);
-                LogMessage("[-] InteractThruWalls Hook 2 disabled, bytes restored, codecave released during shutdown.");
-            }
-            InteractThruWalls::Enabled = false;
-        }
-
-        // AbilityCharge (hotkey-based shellcode, special handling in PollAbilityCharge for restoration on key release/disable)
-        if (AbilityCharge::Enabled && AbilityCharge::InstructionAddress.load() != 0) {
-            // PollAbilityCharge handles restoration if key is up or feature disabled.
-            // For shutdown, explicitly ensure it's restored if it was active via key press.
-            // The wasInjected flag is local to PollAbilityCharge. We check mem_allocated here.
-            if (AbilityCharge::memAllocatedAddress.load() != 0) { // Check if cave was ever made for it
-                 // To be absolutely sure, restore original bytes if address is known.
-                 // This might be redundant if PollAbilityCharge cleaned up, but safe for shutdown.
-                DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress.load(), AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes));
-                // ReleaseCodecave is tricky for hotkey features as the cave might be shared or managed differently.
-                // Assuming AbilityCharge uses a unique cave like other mem_allocated features:
-                // Features::ReleaseCodecave(g_current_pid_drawing, AbilityCharge::memAllocatedAddress, AbilityCharge::mem_allocated); // Need a mem_allocated flag for AbilityCharge
-                LogMessage("[-] AbilityCharge hook (if active) bytes restored during shutdown. Manual cave check needed if shared.");
-            }
-            AbilityCharge::Enabled = false;
-        }
-
-        // LocalPlayer and ViewAngles (complex, with own memory and threads)
-        if (LocalPlayer::Enabled) {
-            if (LocalPlayer::InstructionAddress.load() != 0 && LocalPlayer::mem_allocated) {
-                DriverComm::write_memory_buffer(LocalPlayer::InstructionAddress.load(), LocalPlayer::origBytes, sizeof(LocalPlayer::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, LocalPlayer::memAllocatedAddress, LocalPlayer::mem_allocated);
-            }
-            if (LocalPlayer::addrMemAllocatedAddress.load() != 0 && LocalPlayer::addr_mem_allocated) {
-                DriverComm::free_memory_ex(g_current_pid_drawing, LocalPlayer::addrMemAllocatedAddress.load(), 0);
-                LocalPlayer::addrMemAllocatedAddress.store(0);
-                LocalPlayer::addr_mem_allocated = false;
-            }
-            // Fly sub-feature of LocalPlayer
-            if (Features::LocalPlayer::flyEnabled && LocalPlayer::disableGravAddress.load() != 0 && LocalPlayer::disableGrav_mem_allocated) {
-                 DriverComm::write_memory_buffer(LocalPlayer::disableGravAddress.load(), LocalPlayer::disableGravOrigBytes, sizeof(LocalPlayer::disableGravOrigBytes));
-                 Features::ReleaseCodecave(g_current_pid_drawing, LocalPlayer::disableGravMemAllocatedAddress, LocalPlayer::disableGrav_mem_allocated);
-                 LogMessage("[-] Fly (gravity part) disabled, bytes restored, codecave released.");
-            }
-            LocalPlayer::Enabled = false;
-            LogMessage("[-] LocalPlayer related features disabled, memory freed during shutdown.");
-        }
-        if (ViewAngles::Enabled) { // ViewAngles often tied to LocalPlayer
-            if (ViewAngles::InstructionAddress.load() != 0 && ViewAngles::mem_allocated) {
-                DriverComm::write_memory_buffer(ViewAngles::InstructionAddress.load(), ViewAngles::origBytes, sizeof(ViewAngles::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, ViewAngles::memAllocatedAddress, ViewAngles::mem_allocated);
-            }
-            if (ViewAngles::addrMemAllocatedAddress.load() != 0 && ViewAngles::addr_mem_allocated) {
-                DriverComm::free_memory_ex(g_current_pid_drawing, ViewAngles::addrMemAllocatedAddress.load(), 0);
-                ViewAngles::addrMemAllocatedAddress.store(0);
-                ViewAngles::addr_mem_allocated = false;
-            }
-            ViewAngles::Enabled = false;
-            LogMessage("[-] ViewAngles hook disabled, memory freed during shutdown.");
-        }
-
-        // ActivityLoader
-        if (ActivityLoader::Enabled) {
-            if (ActivityLoader::InstructionAddress.load() != 0 && ActivityLoader::mem_allocated) {
-                DriverComm::write_memory_buffer(ActivityLoader::InstructionAddress.load(), ActivityLoader::origBytes, sizeof(ActivityLoader::origBytes));
-                Features::ReleaseCodecave(g_current_pid_drawing, ActivityLoader::memAllocatedAddress, ActivityLoader::mem_allocated);
-            }
-            if (ActivityLoader::addrMemAllocatedAddress.load() != 0 && ActivityLoader::addr_mem_allocated) {
-                DriverComm::free_memory_ex(g_current_pid_drawing, ActivityLoader::addrMemAllocatedAddress.load(), 0);
-                ActivityLoader::addrMemAllocatedAddress.store(0);
-                ActivityLoader::addr_mem_allocated = false;
-            }
-            ActivityLoader::Enabled = false;
-            LogMessage("[-] ActivityLoader disabled, memory freed during shutdown.");
-        }
-
-        // Simple NOP/Byte Patch Features
-        if (NoJoinAllies::Enabled && NoJoinAllies::InstructionAddress.load() != 0) { DriverComm::write_memory(NoJoinAllies::InstructionAddress.load(), NoJoinAllies::origBytes); NoJoinAllies::Enabled = false; LogMessage("[-] NoJoinAllies disabled."); }
-        if (NoTurnBack::Enabled && NoTurnBack::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(NoTurnBack::InstructionAddress.load(), NoTurnBack::origBytes, sizeof(NoTurnBack::origBytes)); NoTurnBack::Enabled = false; LogMessage("[-] NoTurnBack disabled."); } // Assuming nops is array, write_memory_buffer
-        if (SparrowAnywhere::Enabled && SparrowAnywhere::InstructionAddress.load() != 0) { DriverComm::write_memory(SparrowAnywhere::InstructionAddress.load(), SparrowAnywhere::origByte); SparrowAnywhere::Enabled = false; LogMessage("[-] SparrowAnywhere disabled."); }
-        if (NoRezTokens::Enabled && NoRezTokens::InstructionAddress.load() != 0) { DriverComm::write_memory(NoRezTokens::InstructionAddress.load(), NoRezTokens::origByte); NoRezTokens::Enabled = false; LogMessage("[-] NoRezTokens disabled."); }
-        if (ShootThru::Enabled && ShootThru::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(ShootThru::InstructionAddress.load(), ShootThru::origBytes, sizeof(ShootThru::origBytes)); ShootThru::Enabled = false; LogMessage("[-] ShootThruWalls disabled."); }
-        if (IcarusDash::Enabled && IcarusDash::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(IcarusDash::InstructionAddress.load(), IcarusDash::origBytes, sizeof(IcarusDash::origBytes)); IcarusDash::Enabled = false; LogMessage("[-] IcarusDash disabled."); }
-        if (LobbyCrasher::Enabled && LobbyCrasher::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(LobbyCrasher::InstructionAddress.load(), LobbyCrasher::origBytes, sizeof(LobbyCrasher::origBytes)); LobbyCrasher::Enabled = false; LogMessage("[-] LobbyCrasher disabled."); }
-        if (Oxygen::Enabled && Oxygen::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(Oxygen::InstructionAddress.load(), Oxygen::origBytes, sizeof(Oxygen::origBytes)); Oxygen::Enabled = false; LogMessage("[-] Oxygen disabled."); }
-        if (InfSparrowBoost::Enabled && InfSparrowBoost::InstructionAddress.load() != 0) { DriverComm::write_memory(InfSparrowBoost::InstructionAddress.load(), InfSparrowBoost::origByte); InfSparrowBoost::Enabled = false; LogMessage("[-] InfSparrowBoost disabled."); }
-        if (InfBuffTimers::Enabled && InfBuffTimers::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(InfBuffTimers::InstructionAddress.load(), InfBuffTimers::origBytes, sizeof(InfBuffTimers::origBytes)); InfBuffTimers::Enabled = false; LogMessage("[-] InfBuffTimers disabled."); }
-        if (InfExoticBuffTimers::Enabled && InfExoticBuffTimers::InstructionAddress.load() != 0) { DriverComm::write_memory_buffer(InfExoticBuffTimers::InstructionAddress.load(), InfExoticBuffTimers::origBytes, sizeof(InfExoticBuffTimers::origBytes)); InfExoticBuffTimers::Enabled = false; LogMessage("[-] InfExoticBuffTimers disabled."); }
-        if (AntiFlinch::Enabled) {
-            if(AntiFlinch::InstructionAddress1.load() != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress1.load(), AntiFlinch::origBytes1);
-            if(AntiFlinch::InstructionAddress2.load() != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress2.load(), AntiFlinch::origBytes2);
-            if(AntiFlinch::InstructionAddress3.load() != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress3.load(), AntiFlinch::origBytes3);
-            AntiFlinch::Enabled = false; LogMessage("[-] AntiFlinch disabled.");
-        }
-        // GameSpeed and ImmuneBosses are handled by their Poll functions or direct value writes, not byte patches that need restoring here.
-        // GSize is also direct memory write, no bytes to restore.
-
-        LogMessage("[+] All applicable features disabled and resources potentially freed.");
-        LogMessage("----------------------------------------------------------");
-        LogMessage("[+] Stopping and joining threads...");
-
-        // --- Stop and Join Threads ---
-        // FlyThread (associated with LocalPlayer::flyEnabled)
-        if (Features::LocalPlayer::flyEnabled) { // Check if it was active
-             Features::LocalPlayer::flyEnabled = false; // Ensure it's marked off
-        }
-        StopFlyThread = true; // Signal FlyLoop to stop
-        if (FlyThread.joinable()) {
-            LogMessage("[+] Joining FlyThread...");
-            FlyThread.join();
-            LogMessage("[+] FlyThread joined.");
-        } else {
-            LogMessage("[!] FlyThread was not joinable.");
-        }
-
-        // ImmuneBossesThread
-        ImmuneBosses::Enabled.store(false); // Ensure feature is off
-        ImmuneBosses::ThreadRunning.store(false); // Signal thread to stop
-        if (ImmuneBossesThread.joinable()) {
-            LogMessage("[+] Joining ImmuneBossesThread...");
-            ImmuneBossesThread.join();
-            LogMessage("[+] ImmuneBossesThread joined.");
-        } else {
-            LogMessage("[!] ImmuneBossesThread was not joinable.");
-        }
-
-        // AutoFindPlayerLoop (g_FindPlayerThread)
-        g_FindPlayerEnabled = false; // Disable feature
-        g_StopFindThread = true; // Signal thread to stop
-        if (g_FindPlayerThread.joinable()) {
-            LogMessage("[+] Joining g_FindPlayerThread (AutoFindPlayerLoop)...");
-            g_FindPlayerThread.join();
-            LogMessage("[+] g_FindPlayerThread joined.");
-        } else {
-            LogMessage("[!] g_FindPlayerThread was not joinable.");
-        }
-
-        // ViewAngles::CacheLoop
-        // This thread is detached in EnableViewAngleHook, so it cannot be joined directly.
-        // We can only signal it to stop.
-        ViewAngles::g_cacheThreadRunning.store(false);
-        LogMessage("[+] ViewAngles::CacheLoop signaled to stop (detached thread, cannot join).");
-
-        LogMessage("[+] All stoppable threads processed.");
-        LogMessage("----------------------------------------------------------");
-
-        // --- Existing Shutdown ---
-        if(isInitialized && g_current_pid_drawing != 0) {
-            LogMessage("[+] Sending disconnect command to KM driver...");
-            // The REQUEST_DISCONNECT logic was here. It is now part of DriverComm::shutdown()
-            // which is called next.
-            DriverComm::shutdown(); // This now handles the disconnect IOCTL and internal cleanup
-            LogMessage("[+] DriverComm shut down.");
-        }
-        isInitialized = false; // Ensure this is set
+        isInitialized = false; // Ensure this is set after all cleanup and driver comms
 
         LogMessage("[+] Exiting application now.");
-        // Perform ImGui and other UI cleanup
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
         UI::CleanupDeviceD3D();
-        PostQuitMessage(0); // Standard way to exit Win32 app
-        exit(0); // Force exit
+        PostQuitMessage(0);
+        exit(0);
     }
     ImGui::PopStyleColor(3);    // ─── Header Text ───
     // Align vertically with the button by setting the same Y
