@@ -150,6 +150,78 @@ UINT64 g_received_um_verification_token = 0;
 // const UINT64 SOME_PREDEFINED_CONSTANT_FOR_TOKEN_KM = 0xCAFEFEEDDEAFBEEFULL; // Removed, shared secret will be g_km_dynamic_obfuscation_xor_key
 
 VOID DiscoveryAndAttachmentThread(PVOID StartContext); // Forward declaration
+
+static VOID PrepareForUnload() {
+    debug_print("[+] PrepareForUnload: Preparing driver for unload sequence.\n");
+    KIRQL oldIrql;
+
+    // Stop Discovery Thread (though it should have exited after handshake)
+    if (g_discovery_thread_handle) {
+        g_discovery_thread_should_run = FALSE; // Signal
+        // Attempt to get a reference to the thread object to wait for it.
+        PETHREAD discovery_thread_object_ref = NULL;
+        NTSTATUS status_ref_discovery = ObReferenceObjectByHandle(
+            g_discovery_thread_handle,
+            THREAD_ALL_ACCESS, // Or THREAD_QUERY_INFORMATION | SYNCHRONIZE
+            *PsThreadType,
+            KernelMode,
+            (PVOID*)&discovery_thread_object_ref,
+            NULL
+        );
+
+        if (NT_SUCCESS(status_ref_discovery) && discovery_thread_object_ref) {
+            debug_print("[+] PrepareForUnload: Waiting for DiscoveryAndAttachmentThread to terminate.\n");
+            KeWaitForSingleObject(discovery_thread_object_ref, Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(discovery_thread_object_ref);
+            debug_print("[+] PrepareForUnload: DiscoveryAndAttachmentThread terminated.\n");
+        } else {
+            debug_print("[-] PrepareForUnload: Failed to reference/wait for DiscoveryAndAttachmentThread. Status: 0x%X. It might have already exited.\n", status_ref_discovery);
+        }
+        // We close the handle in DriverUnload, not here, to avoid issues if DriverUnload is called separately.
+        // ZwClose(g_discovery_thread_handle);
+        // g_discovery_thread_handle = NULL;
+    }
+
+    // Stop Polling Work Item
+    KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+    g_km_thread_should_run = FALSE;
+    PWORK_QUEUE_ITEM localWorkItem = g_pPollingWorkItem; // Copy the pointer
+    g_pPollingWorkItem = NULL; // Prevent further queuing from KmPollingWorkItemCallback itself
+    KeReleaseSpinLock(&g_comm_lock, oldIrql);
+
+    if (localWorkItem) {
+        // Attempt to remove the work item from the queue if it's pending.
+        // This is not straightforward as ExQueueWorkItem doesn't return something that can be "cancelled" easily.
+        // The g_km_thread_should_run = FALSE check within the callback is the primary stop mechanism.
+        // We can free the allocation here as it won't be requeued.
+        debug_print("[+] PrepareForUnload: Polling work item signaled to stop and memory freed.\n");
+        ExFreePoolWithTag(localWorkItem, 'WkIt'); // Ensure 'WkIt' matches allocation tag
+    }
+
+    // Clear shared UM pointers and dereference target process
+    PEPROCESS processToDereference = NULL;
+    KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+    if (g_target_process) {
+        processToDereference = g_target_process;
+        g_target_process = NULL;
+    }
+    g_um_shared_comm_block_ptr = NULL;
+    // Also clear handshake-related globals that might hold stale UM data
+    g_obfuscated_ptr1_um_addr_via_handshake = NULL;
+    RtlZeroMemory(g_received_beacon_pattern_km, sizeof(g_received_beacon_pattern_km));
+    g_received_um_verification_token = 0;
+
+    KeReleaseSpinLock(&g_comm_lock, oldIrql);
+
+    if (processToDereference) {
+        ObDereferenceObject(processToDereference);
+        debug_print("[+] PrepareForUnload: Target process dereferenced.\n");
+    }
+
+    debug_print("[+] PrepareForUnload: Driver activities quiesced.\n");
+    // Note: Device object and symbolic link are cleaned up in DriverUnload.
+}
+
 NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp); // Forward declaration
 
 
@@ -162,6 +234,7 @@ enum class CommCommand : uint32_t {
     REQUEST_GET_MODULE_BASE,
     REQUEST_AOB_SCAN,
     REQUEST_ALLOCATE_MEMORY,
+    REQUEST_DISCONNECT, // Added for clean disconnect
 };
 
 enum class SlotStatus : uint32_t {
@@ -878,6 +951,44 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
                  km_slot_copy.result_status_code = status;
                  debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to allocate memory. Status: 0x%X.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, status);
             }
+            break;
+        }
+        case CommCommand::REQUEST_DISCONNECT: {
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - REQUEST_DISCONNECT received.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+
+            KIRQL oldIrql;
+            KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+
+            g_km_thread_should_run = FALSE; // Signal polling thread to stop
+
+            PEPROCESS processToDereference = g_target_process;
+            g_target_process = NULL;
+            g_um_shared_comm_block_ptr = NULL;
+
+            KeReleaseSpinLock(&g_comm_lock, oldIrql);
+
+            if (processToDereference) {
+                // Important: Check if the process_id in the command matches the g_target_process's PID
+                // before dereferencing. This is a command FROM this specific UM instance ABOUT itself.
+                // The km_slot_copy.process_id is the PID of the UM instance sending the disconnect.
+                HANDLE current_um_pid = PsGetProcessId(processToDereference);
+                if (current_um_pid == (HANDLE)km_slot_copy.process_id) {
+                    ObDereferenceObject(processToDereference);
+                    debug_print("[+] ProcessSlotRequest: Disconnected. Target process (PID %llu) dereferenced.\n", km_slot_copy.process_id);
+                } else {
+                    // This shouldn't happen if logic is correct UM-side, but good to handle.
+                    // We don't dereference if PIDs don't match, as it might be a stale g_target_process
+                    // from a previous session or an unexpected PID in the command.
+                    // The key thing is g_km_thread_should_run = FALSE and g_um_shared_comm_block_ptr = NULL are set.
+                    debug_print("[!] ProcessSlotRequest: Disconnect for PID %llu, but current g_target_process PID is %p. Not dereferencing this g_target_process. Polling stopped.\n", km_slot_copy.process_id, current_um_pid);
+                }
+            } else {
+                debug_print("[+] ProcessSlotRequest: Disconnected. No target process was globally attached. Polling stopped.\n");
+            }
+
+            km_slot_copy.result_status_code = STATUS_SUCCESS;
+            km_slot_copy.output_size = 0;
+            // Status will be set to KM_COMPLETED_SUCCESS by the common logic after the switch.
             break;
         }
         default:
@@ -1992,6 +2103,18 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
                  km_slot_copy.result_status_code = status;
                  debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to allocate memory. Status: 0x%X.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, status);
             }
+            break;
+        }
+        case IOCTL_REQUEST_UNLOAD_DRIVER: {
+            debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER received from PID %lu.\n", (ULONG)(ULONG_PTR)PsGetProcessId(callingProcess));
+            // Security check: Potentially verify if the calling process has the necessary privileges (e.g., admin).
+            // This can be done using SePrivilegeCheck or by checking the SID of the caller.
+            // For this example, we assume that the IOCTL's SDDL in IoCreateDeviceSecure handles sufficient access control.
+
+            PrepareForUnload(); // Call the function to quiesce driver activities
+            status = STATUS_SUCCESS;
+            Irp->IoStatus.Information = 0; // No data to return for this IOCTL
+            debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER processed successfully.\n");
             break;
         }
         default:
