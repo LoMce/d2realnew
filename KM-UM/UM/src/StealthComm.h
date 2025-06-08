@@ -1,0 +1,150 @@
+#pragma once
+
+#include <Windows.h>
+#include <cstdint>
+#include <atomic>
+#include <iostream> // For std::cerr, min/max. Consider alternatives for header.
+
+// NTSTATUS Success Macro (for User Mode)
+#ifndef MY_NT_SUCCESS
+#define MY_NT_SUCCESS(status) (((LONG)(status)) >= 0)
+#endif
+
+// Stealth Communication Protocol Definitions
+#define MAX_COMM_SLOTS 4
+// #define SIGNATURE_VALUE 0xDEADBEEFCAFEBABE // Unique signature for shared block - REMOVED for dynamic signature
+#define MAX_PARAM_SIZE 256
+#define MAX_OUTPUT_SIZE 256
+
+enum class CommCommand : uint32_t {
+    REQUEST_NOP = 0,
+    REQUEST_READ_MEMORY,
+    REQUEST_WRITE_MEMORY,
+    REQUEST_GET_MODULE_BASE,
+    REQUEST_AOB_SCAN,
+    REQUEST_ALLOCATE_MEMORY,
+};
+
+enum class SlotStatus : uint32_t {
+    EMPTY = 0,
+    UM_REQUEST_PENDING,
+    KM_PROCESSING_REQUEST,
+    KM_COMPLETED_SUCCESS,
+    KM_COMPLETED_ERROR,
+    UM_ACKNOWLEDGED
+};
+
+struct CommunicationSlot {
+    volatile SlotStatus status;
+    uint32_t request_id;
+    CommCommand command_id;
+    uint64_t process_id;
+
+    uint8_t parameters[MAX_PARAM_SIZE];
+    uint32_t param_size;
+
+    uint8_t output[MAX_OUTPUT_SIZE];
+    uint32_t output_size;
+
+    uint64_t result_status_code;
+
+    // Added for ChaCha20 + Poly1305
+    uint8_t nonce[12]; // ChaCha20 Nonce/IV
+    uint8_t mac[16];   // Poly1305 MAC
+};
+
+struct SharedCommBlock {
+    volatile uint64_t signature;
+    volatile uint32_t um_slot_index;
+    volatile uint32_t km_slot_index;
+    CommunicationSlot slots[MAX_COMM_SLOTS];
+    volatile uint64_t honeypot_field; // Added honeypot field
+};
+
+namespace StealthComm {
+
+// --- START: Definitions for UM->KM Handshake (must match KM) ---
+// Use a well-known GUID for UM to find. In a real scenario, this might be more dynamic or obfuscated.
+const WCHAR HANDSHAKE_DEVICE_SYMLINK_NAME_UM[] = L"\\\\Global??\\CoreSysComLink_{E7A1B02C-0D9F-45C1-9D8E-F6B5C4A3210F}";
+// Note: KM uses L"\\DosDevices\\CoreSysComLink_{...}". For UM access, typically \\Global??\\ or \\??\\ is used.
+// If UM is not session 0, \\Global??\\ is often required.
+
+// Define the IOCTL code for handshake (must match KM)
+#define IOCTL_STEALTH_HANDSHAKE_UM CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define BEACON_PATTERN_SIZE 16 // Define beacon size
+
+// Structure for handshake data (must match KM)
+typedef struct _STEALTH_HANDSHAKE_DATA_UM {
+    PVOID ObfuscatedPtrStruct1HeadUmAddress; // UM VA
+    UINT64 VerificationToken; // Optional: for UM/KM to verify each other
+    UINT8 BeaconPattern[BEACON_PATTERN_SIZE]; // Beacon pattern to help KM find DynamicSignaturesRelay
+} STEALTH_HANDshake_DATA_UM, *PSTEALTH_HANDSHAKE_DATA_UM;
+// --- END: Definitions for UM->KM Handshake ---
+
+// Structure to hold dynamic signatures and keys, to be relayed to KM
+// The beacon is now the first member, so finding the beacon means finding this struct.
+struct DynamicSignaturesRelay {
+    UINT8 beacon[BEACON_PATTERN_SIZE]; // This beacon will be AOB scanned by KM
+    uint64_t dynamic_head_signature;
+    uint64_t dynamic_shared_comm_block_signature;
+    uint64_t dynamic_obfuscation_xor_key;
+};
+
+// Forward declaration
+struct SharedCommBlock;
+
+// Quad Chained Pointer Structures
+struct PtrStruct4_UM {
+    volatile SharedCommBlock* data_block;
+    uint64_t obfuscation_value1;
+    uint64_t obfuscation_value2;
+};
+
+struct PtrStruct3_UM {
+    volatile PtrStruct4_UM* next_ptr_struct;
+    uint64_t obfuscation_value1;
+    uint64_t obfuscation_value2;
+};
+
+struct PtrStruct2_UM {
+    volatile PtrStruct3_UM* next_ptr_struct;
+    uint64_t obfuscation_value1;
+    uint64_t obfuscation_value2;
+};
+
+struct PtrStruct1_UM {
+    volatile PtrStruct2_UM* next_ptr_struct;
+    uint64_t head_signature; // New signature for kernel to find this head
+    uint64_t obfuscation_value1;
+};
+
+// New signature for the head of the chain
+// #define HEAD_SIGNATURE_VALUE 0xABCDEF0123456789 // REMOVED for dynamic signature
+
+extern SharedCommBlock* g_shared_comm_block;
+extern std::atomic<uint32_t> g_next_request_id;
+
+bool InitializeStealthComm();
+void ShutdownStealthComm(); // Added for proper deallocation
+
+bool SubmitRequestAndWait(
+    CommCommand command,
+    uint64_t target_pid,
+    const uint8_t* params,
+    uint32_t params_size,
+    uint8_t* output_buf,
+    uint32_t& output_size, // In: max_size, Out: actual_size
+    uint64_t& km_status_code,
+    uint32_t timeout_ms = 5000
+);
+
+bool ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read);
+bool WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written);
+uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name);
+uintptr_t AobScan(uint64_t target_pid, uintptr_t start_address, size_t scan_size,
+                  const char* pattern, const char* mask, // Assuming pattern is combined or KM handles mask
+                  uint8_t* out_saved_bytes, size_t saved_bytes_size); // Note: saved_bytes not currently filled by KM
+uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address);
+
+} // namespace StealthComm

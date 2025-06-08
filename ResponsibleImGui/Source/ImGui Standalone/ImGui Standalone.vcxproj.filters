@@ -1,0 +1,58 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="Drawing.cpp" />
+    <ClCompile Include="DriverComm.cpp" />
+    <ClCompile Include="ImGui\imgui.cpp" />
+    <ClCompile Include="ImGui\imgui_demo.cpp" />
+    <ClCompile Include="ImGui\imgui_draw.cpp" />
+    <ClCompile Include="ImGui\imgui_impl_dx11.cpp" />
+    <ClCompile Include="ImGui\imgui_impl_win32.cpp" />
+    <ClCompile Include="ImGui\imgui_tables.cpp" />
+    <ClCompile Include="ImGui\imgui_widgets.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="themes.cpp" />
+    <ClCompile Include="TPManager.cpp" />
+    <ClCompile Include="UI.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="aobs\aobs.h" />
+    <ClInclude Include="Drawing.h" />
+    <ClInclude Include="DriverComm.h" />
+    <ClInclude Include="Features.h" />
+    <ClInclude Include="FeaturesDecl.h" />
+    <ClInclude Include="fonts\FiraCode-Regular.h" />
+    <ClInclude Include="fonts\font_globals.h" />
+    <ClInclude Include="fonts\Inter.h" />
+    <ClInclude Include="ImGui\imconfig.h" />
+    <ClInclude Include="ImGui\imgui.h" />
+    <ClInclude Include="ImGui\imgui_custom.h" />
+    <ClInclude Include="ImGui\imgui_impl_dx11.h" />
+    <ClInclude Include="ImGui\imgui_impl_win32.h" />
+    <ClInclude Include="ImGui\imgui_internal.h" />
+    <ClInclude Include="ImGui\imstb_rectpack.h" />
+    <ClInclude Include="ImGui\imstb_textedit.h" />
+    <ClInclude Include="ImGui\imstb_truetype.h" />
+    <ClInclude Include="json.hpp" />
+    <ClInclude Include="json\json.hpp" />
+    <ClInclude Include="pch.h" />
+    <ClInclude Include="themes.h" />
+    <ClInclude Include="TPManager.h" />
+    <ClInclude Include="UI.h" />
+    <ClInclude Include="utils.hpp" />
+    <ClInclude Include="VirtualKeys.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="library_x64.lib" />
+  </ItemGroup>
+  <ItemGroup>
+    <Font Include="fonts\FiraCode-Regular.ttf" />
+    <Font Include="fonts\Inter-Bold.ttf" />
+    <Font Include="fonts\Inter.ttf" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="kdmapper.exe" />
+    <None Include="kdu.exe" />
+    <None Include="KM.sys" />
+  </ItemGroup>
+</Project>

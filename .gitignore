@@ -1,0 +1,11 @@
+# Visual Studio
+**/.vs/
+
+# Build outputs
+**/x64build/
+**/x64/
+
+
+# Optional: Ignore other temp or cache folders
+**/bin/
+**/obj/

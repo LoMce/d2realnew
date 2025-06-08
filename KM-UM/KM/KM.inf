@@ -1,0 +1,66 @@
+;
+; KM.inf
+;
+; Note: Many "TODO" items below are standard fields in an INF file.
+; For a production driver, these would be filled with specific company and driver information.
+; For this project's current scope, they are left as defaults or placeholders.
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass ; Example: Human Interface Device
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da} ; Example: GUID_DEVCLASS_HIDCLASS
+Provider    = %ManufacturerName%
+CatalogFile = KM.cat
+DriverVer   = 01/01/2024,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+KM.sys = 1,,
+
+;*****************************************
+; Install Section
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...16299 ; %13% support introduced in build 16299
+
+[Standard.NT$ARCH$.10.0...16299]
+%KM.DeviceDesc% = KM_Device, Root\KM ; TODO: Review hw-id, Root\KM is typical for root-enumerated virtual devices.
+
+[KM_Device.NT]
+CopyFiles = File_Copy
+
+[File_Copy]
+KM.sys
+
+;-------------- Service installation
+[KM_Device.NT.Services]
+AddService = KM,%SPSVCINST_ASSOCSERVICE%, KM_Service_Inst
+
+; -------------- KM driver install sections
+[KM_Service_Inst]
+DisplayName    = %KM.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\KM.sys
+
+[KM_Device.NT.Wdf]
+KmdfService = KM, KM_wdfsect
+
+[KM_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName = "Standard System Devices"
+DiskName = "KM Installation Disk"
+KM.DeviceDesc = "System Interface"
+KM.SVCDESC = "System Interface Service"
