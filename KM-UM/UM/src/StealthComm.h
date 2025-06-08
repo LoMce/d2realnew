@@ -5,10 +5,33 @@
 #include <atomic>
 #include <iostream> // For std::cerr, min/max. Consider alternatives for header.
 
-// NTSTATUS Success Macro (for User Mode)
-#ifndef MY_NT_SUCCESS
-#define MY_NT_SUCCESS(status) (((LONG)(status)) >= 0)
+// Minimal NTSTATUS definitions
+#ifndef NTSTATUS
+typedef long NTSTATUS;
 #endif
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_UNSUCCESSFUL
+#define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)
+#endif
+#ifndef STATUS_TIMEOUT
+#define STATUS_TIMEOUT ((NTSTATUS)0x00000102L)
+#endif
+#ifndef STATUS_NO_MEMORY
+#define STATUS_NO_MEMORY ((NTSTATUS)0xC0000017L)
+#endif
+// This one clashes with KM's ntdef.h if this header were ever included in KM.
+// For UM only, it's fine. Or use a different name like MY_NT_SUCCESS.
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(status) (((NTSTATUS)(status)) >= 0)
+#endif
+
+// NTSTATUS Success Macro (for User Mode) - Retaining MY_NT_SUCCESS for existing uses if any, but prefer NT_SUCCESS
+#ifndef MY_NT_SUCCESS
+#define MY_NT_SUCCESS(status) (((NTSTATUS)(status)) >= 0)
+#endif
+
 
 // Stealth Communication Protocol Definitions
 #define MAX_COMM_SLOTS 4
@@ -24,6 +47,7 @@ enum class CommCommand : uint32_t {
     REQUEST_AOB_SCAN,
     REQUEST_ALLOCATE_MEMORY,
     REQUEST_DISCONNECT, // Added for clean disconnect
+    REQUEST_FREE_MEMORY, // Added for freeing memory
 };
 
 enum class SlotStatus : uint32_t {
@@ -60,6 +84,7 @@ struct SharedCommBlock {
     volatile uint32_t km_slot_index;
     CommunicationSlot slots[MAX_COMM_SLOTS];
     volatile uint64_t honeypot_field; // Added honeypot field
+    volatile ULONG km_fully_initialized_flag; // Added for KM ready signal
 };
 
 namespace StealthComm {
@@ -147,5 +172,6 @@ uintptr_t AobScan(uint64_t target_pid, uintptr_t start_address, size_t scan_size
                   const char* pattern, const char* mask, // Assuming pattern is combined or KM handles mask
                   uint8_t* out_saved_bytes, size_t saved_bytes_size); // Note: saved_bytes not currently filled by KM
 uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address);
+bool FreeMemory(uint64_t target_pid, uintptr_t address, size_t size); // Added to free allocated memory
 
 } // namespace StealthComm

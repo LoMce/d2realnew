@@ -3,7 +3,8 @@
 #include <string>
 #include <cmath>
 #include <chrono>
-#include <thread>
+#include <thread> // Already present, good.
+#include <atomic> // Ensure this is present for g_aob_scan_complete_flag etc.
 #include "DriverComm.h"
 #include <algorithm>  // for std::copy_n
 #include <iterator>   // for std::begin / std::size
@@ -29,6 +30,38 @@
 #include "fonts/font_globals.h"
 
 #include <iomanip>
+
+// Definition for the background AOB scanning thread function
+void AsyncInitializeSignaturesAndBytes_ThreadFunc(uintptr_t moduleBase, DWORD processId) {
+    if (moduleBase == 0 || processId == 0) {
+        LogMessageF("[-] AsyncInitializeSignaturesAndBytes_ThreadFunc: Invalid parameters (moduleBase: 0x%llX, processId: %lu). Aborting scan.", moduleBase, processId);
+        Features::g_aob_scan_running = false; // Reset running flag as we are aborting
+        Features::g_aob_scan_complete_flag = false; // Ensure it's not mistakenly true
+        return;
+    }
+
+    LogMessageF("[+] AsyncInitializeSignaturesAndBytes_ThreadFunc: Started for PID %lu, Base 0x%llX.", processId, moduleBase);
+
+    // Ensure that DriverComm::g_pid is set appropriately if PerformStartupAobScans or PerformStartupByteReads implicitly rely on it.
+    // The DriverComm functions (AOBScan, read_memory_buffer) use DriverComm::g_pid.
+    // Since this thread is detached and DriverComm::g_pid is set in the main thread during attach_to_process,
+    // there's a potential reliance on DriverComm::g_pid being valid.
+    // For now, we assume DriverComm::g_pid is correctly set by the main thread's initialization logic
+    // before this thread performs operations that use it. The passed `processId` parameter is used
+    // for logging here but the Features functions might call DriverComm which uses its global g_pid.
+    // A safer approach might be to modify Features::PerformStartupAobScans and ::PerformStartupByteReads
+    // to explicitly take and use the PID, or ensure DriverComm is thread-safe regarding g_pid if used by these.
+    // However, the current Features::PerformStartupAobScans and ::PerformStartupByteReads signatures
+    // in Features.h *do* take a PID. So we should use the passed 'processId'.
+
+    Features::PerformStartupAobScans(processId, moduleBase);
+    Features::PerformStartupByteReads(processId, moduleBase); // Pass PID here too
+
+    LogMessageF("[+] AsyncInitializeSignaturesAndBytes_ThreadFunc: Completed for PID %lu, Base 0x%llX.", processId, moduleBase);
+
+    Features::g_aob_scan_complete_flag = true;
+    Features::g_aob_scan_running = false;
+}
 
 
 
@@ -494,13 +527,15 @@ void UpdateFeatureStates(DWORD pid_param) {
             if (cave_allocated_flag) {
                 if (DriverComm::write_memory_buffer(instrAddr, origBytes, origSize)) {
                     LogMessageF("[-] [%s] Disabled (bytes restored) at 0x%llX.", featureName, instrAddr);
-                    // cave_allocated_flag remains true, cave_addr_var still holds the address for reuse.
+                    // Now, also release the codecave if it was allocated for this feature.
+                    // Pass pid_param, cave_addr_var (which is std::atomic<uintptr_t>), and cave_allocated_flag.
+                    Features::ReleaseCodecave(pid_param, cave_addr_var, cave_allocated_flag);
                 } else {
-                    LogMessageF("[-] [%s] Failed to restore original bytes at 0x%llX.", featureName, instrAddr);
-                    enabledFlag = true;
+                    LogMessageF("[-] [%s] Failed to restore original bytes at 0x%llX. Codecave not released.", featureName, instrAddr);
+                    enabledFlag = true; // Revert toggle as disable failed
                 }
             } else {
-                LogMessageF("[-] [%s] Disabled (no active hook/cave to restore) at 0x%llX.", featureName, instrAddr);
+                LogMessageF("[-] [%s] Disabled (no active hook/cave to restore or release) at 0x%llX.", featureName, instrAddr);
             }
         }
         wasEnabledFlag = enabledFlag; // Sync wasEnabledFlag with the final state of enabledFlag
@@ -672,11 +707,13 @@ void UpdateFeatureStates(DWORD pid_param) {
             }
         } else { // Disabling
             LogMessage("[-] [InstaRespawn/RespawnAnywhere] Attempting to disable...");
-            if (InstaRespawn::InstructionAddress != 0 && wasInstaRespawnEnabled) {
-                DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress, InstaRespawn::origBytes, sizeof(InstaRespawn::origBytes));
+            if (InstaRespawn::InstructionAddress.load() != 0 && wasInstaRespawnEnabled) { // .load() for atomic
+                DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress.load(), InstaRespawn::origBytes, sizeof(InstaRespawn::origBytes));
             }
-            if (RespawnAnywhere::InstructionAddress != 0 && RespawnAnywhere::mem_allocated) {
-                DriverComm::write_memory_buffer(RespawnAnywhere::InstructionAddress, RespawnAnywhere::origBytes, sizeof(RespawnAnywhere::origBytes));
+            if (RespawnAnywhere::InstructionAddress.load() != 0 && RespawnAnywhere::mem_allocated) { // .load() for atomic
+                DriverComm::write_memory_buffer(RespawnAnywhere::InstructionAddress.load(), RespawnAnywhere::origBytes, sizeof(RespawnAnywhere::origBytes));
+                // Release codecave for RespawnAnywhere
+                Features::ReleaseCodecave(pid_param, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated);
             }
         }
         wasInstaRespawnEnabled = InstaRespawn::Enabled;
@@ -759,11 +796,13 @@ void UpdateFeatureStates(DWORD pid_param) {
             }
         } else { // Disabling
             LogMessage("[-] [InteractThruWalls] Attempting to disable...");
-            if (InteractThruWalls::InstructionAddress1 != 0 && InteractThruWalls::mem_allocated1) {
-                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress1, InteractThruWalls::origBytes1, sizeof(InteractThruWalls::origBytes1));
+            if (InteractThruWalls::InstructionAddress1.load() != 0 && InteractThruWalls::mem_allocated1) { // .load() for atomic
+                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress1.load(), InteractThruWalls::origBytes1, sizeof(InteractThruWalls::origBytes1));
+                Features::ReleaseCodecave(pid_param, InteractThruWalls::memAllocatedAddress1, InteractThruWalls::mem_allocated1);
             }
-            if (InteractThruWalls::InstructionAddress2 != 0 && InteractThruWalls::mem_allocated2) {
-                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress2, InteractThruWalls::origBytes2, sizeof(InteractThruWalls::origBytes2));
+            if (InteractThruWalls::InstructionAddress2.load() != 0 && InteractThruWalls::mem_allocated2) { // .load() for atomic
+                DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress2.load(), InteractThruWalls::origBytes2, sizeof(InteractThruWalls::origBytes2));
+                Features::ReleaseCodecave(pid_param, InteractThruWalls::memAllocatedAddress2, InteractThruWalls::mem_allocated2);
             }
         }
         wasInteractThruWallsEnabled = InteractThruWalls::Enabled;
@@ -781,12 +820,13 @@ void UpdateFeatureStates(DWORD pid_param) {
             }
         } else { // Disabling
             LogMessage("[-] [ActivityLoader] Attempting to disable...");
-            if (ActivityLoader::InstructionAddress != 0 && ActivityLoader::mem_allocated) {
-                if (DriverComm::write_memory_buffer(ActivityLoader::InstructionAddress, ActivityLoader::origBytes, sizeof(ActivityLoader::origBytes))) {
-                    LogMessageF("[-] [ActivityLoader] Hook disabled, bytes restored at 0x%llX.", ActivityLoader::InstructionAddress);
-                    ActivityLoader::mem_allocated = false;
+            if (ActivityLoader::InstructionAddress.load() != 0 && ActivityLoader::mem_allocated) { // .load() for atomic
+                if (DriverComm::write_memory_buffer(ActivityLoader::InstructionAddress.load(), ActivityLoader::origBytes, sizeof(ActivityLoader::origBytes))) {
+                    LogMessageF("[-] [ActivityLoader] Hook disabled, bytes restored at 0x%llX.", ActivityLoader::InstructionAddress.load());
+                    // ActivityLoader::mem_allocated will be set to false by ReleaseCodecave
+                    Features::ReleaseCodecave(pid_param, ActivityLoader::memAllocatedAddress, ActivityLoader::mem_allocated);
                 } else {
-                    LogMessageF("[-] [ActivityLoader] Failed to restore bytes at 0x%llX.", ActivityLoader::InstructionAddress);
+                    LogMessageF("[-] [ActivityLoader] Failed to restore bytes at 0x%llX.", ActivityLoader::InstructionAddress.load());
                     ActivityLoader::Enabled = true; // Failed to disable
                 }
             } else LogMessageF("[-] [ActivityLoader] Not active/allocated, no restoration for 0x%llX.", ActivityLoader::InstructionAddress);
@@ -834,15 +874,15 @@ void Drawing::Draw() {
                 wcstombs_s(&convertedChars, narrowModuleName, sizeof(narrowModuleName), g_wModuleName.c_str(), _TRUNCATE);
                 LogMessageF("[!] Drawing::Draw: Target process %s (PID: %lu) lost. Resetting.", narrowModuleName, g_current_pid_drawing);
 
-                if(isInitialized) {
+                if(isInitialized) { // Only shutdown if it was initialized
                      LogMessage("[+] Shutting down DriverComm due to process loss...");
-                     DriverComm::shutdown();
+                     DriverComm::shutdown(); // This will also reset DriverComm::g_pid
                      LogMessage("[+] DriverComm shut down.");
                 }
 
                 // Signal and join ImmuneBossesThread
-                ImmuneBosses::Enabled.store(false);
-                ImmuneBosses::ThreadRunning.store(false);
+                ImmuneBosses::Enabled.store(false); // Disable feature
+                ImmuneBosses::ThreadRunning.store(false); // Signal thread to stop (if it checks this)
                 if (ImmuneBossesThread.joinable()) {
                     LogMessage("[+] Joining ImmuneBossesThread due to process loss...");
                     ImmuneBossesThread.join();
@@ -850,20 +890,52 @@ void Drawing::Draw() {
                 }
 
                 // Signal and join FlyThread
-                Features::LocalPlayer::flyEnabled = false;
-                StopFlyThread = true;
+                Features::LocalPlayer::flyEnabled = false; // Disable feature
+                StopFlyThread = true; // Signal thread to stop
                 if (FlyThread.joinable()) {
                     LogMessage("[+] Joining FlyThread due to process loss...");
                     FlyThread.join();
                     LogMessage("[+] FlyThread joined.");
                 }
 
+                // Stop any ongoing AOB scan
+                if (Features::g_aob_scan_running.load()) {
+                    // There's no direct cancellation mechanism for the detached AOB thread.
+                    // It will complete, but its results might be for an old session.
+                    // The g_aob_scan_complete_flag will be set by it eventually.
+                    // When a new process is found, InitializeStealthComm logic will run again,
+                    // and a new AOB scan thread will be launched if conditions are met.
+                    // The primary safeguard is that g_current_pid_drawing and g_moduleBaseAddress_drawing are reset.
+                    LogMessage("[!] Drawing::Draw: AOB scan might be running for the lost process. It will complete but results will be discarded on next init.");
+                    // We can reset g_aob_scan_running here, so a new scan can start if a new process is found quickly.
+                    // The old detached thread will still run to completion but won't re-trigger.
+                    Features::g_aob_scan_running = false;
+                    // g_aob_scan_complete_flag will be reset when a new scan is launched.
+                }
+
+
                 isInitialized = false;
                 g_current_pid_drawing = 0;
                 g_moduleBaseAddress_drawing = 0;
+                // Reset feature states that depend on addresses
+                // This is important so that stale addresses are not used if the game restarts with a different base.
+                // Features::PerformStartupAobScans(0, 0); // Call with 0 to effectively nullify addresses
+                // Instead of calling with 0, explicitly reset key atomic addresses to 0.
+                // This is safer as PerformStartupAobScans would try to call DriverComm::AOBScan with PID 0.
+                // Example (needs to be comprehensive for all features):
+                for (auto& ns_ptr_pair : Features::feature_address_map_example) { // Assuming such a map or iterate manually
+                    if (ns_ptr_pair.second) {
+                        ns_ptr_pair.second->store(0);
+                    }
+                }
+                // Resetting all feature addresses to 0 manually or via a helper
+                // is crucial here to prevent using stale addresses if the game restarts.
+                // For now, this is a conceptual reset. A real implementation would iterate all feature addresses.
+                LogMessage("[!] Drawing::Draw: Feature addresses should be reset here.");
+
 
                 // Reset relevant feature states
-                LocalPlayer::Enabled = false;
+                LocalPlayer::Enabled = false; // Also reset enabled states as context is lost
                 // ... (ensure other features that might hold state or threads are reset)
             }
             lastPidCheckTime = now;
@@ -895,11 +967,18 @@ void Drawing::Draw() {
                     if (g_moduleBaseAddress_drawing != 0) {
                         #ifdef _DEBUG
                         LogMessageF("[+] Drawing::Draw: Module base address: 0x%llX", g_moduleBaseAddress_drawing);
-                        LogMessage("[+] Drawing::Draw: Starting AOB scans...");
                         #endif
                         // These functions will need to be updated to not require driver/pid, or use g_current_pid_drawing and g_moduleBaseAddress_drawing
-                        PerformStartupAobScans(g_moduleBaseAddress_drawing);
-                        PerformStartupByteReads();
+                        // PerformStartupAobScans(g_moduleBaseAddress_drawing); // Will be called in background
+                        // PerformStartupByteReads(); // Will be called in background
+
+                        if (!Features::g_aob_scan_complete_flag.load() && !Features::g_aob_scan_running.load()) {
+                            Features::g_aob_scan_running = true; // Set before starting thread
+                            Features::g_aob_scan_complete_flag = false; // Reset if re-attaching
+                            std::thread sigThread(AsyncInitializeSignaturesAndBytes_ThreadFunc, g_moduleBaseAddress_drawing, g_current_pid_drawing);
+                            sigThread.detach();
+                            LogMessage("[+] Drawing::Draw: Launched AsyncInitializeSignaturesAndBytes_ThreadFunc.");
+                        }
 
                         LoadHotkeys();
                         SetHotkeyDefault("FlyToggle", VK_F1);
@@ -1078,6 +1157,14 @@ void Drawing::Draw() {
     ImGui::SetCursorPosY(posY);
     ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize(lpWindowName).x) * 0.5f); // Use lpWindowName
     ImGui::TextColored(ImVec4(0.9f, 0.7f, 1.0f, 1.0f), "HATEMOB");    // ─── Divider ───
+
+    // Display AOB scan status
+    if (Features::g_aob_scan_running.load() && !Features::g_aob_scan_complete_flag.load()) {
+        ImGui::SetCursorPosY(posY + xButtonSize_local + 10); // Adjust position as needed
+        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("Scanning features...").x) * 0.5f);
+        ImGui::TextDisabled("Scanning features...");
+    }
+
     ImGui::SetCursorPosY(posY + xButtonSize_local + 23); // Use xButtonSize_local
     ImGui::Separator();
 

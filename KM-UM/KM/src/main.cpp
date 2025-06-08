@@ -225,52 +225,9 @@ static VOID PrepareForUnload() {
 NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp); // Forward declaration
 
 
-ULONG       g_max_comm_slots = 4;
+ULONG       g_max_comm_slots = MAX_COMM_SLOTS_KM; // Use definition from includes.h
 
-enum class CommCommand : uint32_t {
-    REQUEST_NOP = 0,
-    REQUEST_READ_MEMORY,
-    REQUEST_WRITE_MEMORY,
-    REQUEST_GET_MODULE_BASE,
-    REQUEST_AOB_SCAN,
-    REQUEST_ALLOCATE_MEMORY,
-    REQUEST_DISCONNECT, // Added for clean disconnect
-};
-
-enum class SlotStatus : uint32_t {
-    EMPTY = 0,
-    UM_REQUEST_PENDING,
-    KM_PROCESSING_REQUEST,
-    KM_COMPLETED_SUCCESS,
-    KM_COMPLETED_ERROR,
-    UM_ACKNOWLEDGED
-};
-
-#pragma pack(push, 1)
-struct CommunicationSlot {
-    volatile SlotStatus status;
-    uint32_t request_id;
-    CommCommand command_id;
-    uint64_t process_id;
-    uint8_t parameters[256];
-    uint32_t param_size;
-    uint8_t output[256];
-    uint32_t output_size;
-    uint64_t result_status_code;
-    uint8_t nonce[12];
-    uint8_t mac_tag[16];
-};
-
-struct SharedCommBlock {
-    volatile uint64_t signature;
-    volatile uint32_t um_slot_index;
-    volatile uint32_t km_slot_index;
-    CommunicationSlot slots[4];
-    volatile uint64_t honeypot_field;
-};
-#pragma pack(pop)
-
-// struct SharedCommBlock defined above
+// struct SharedCommBlock defined in includes.h
 
 #pragma pack(push, 1)
 struct PtrStruct4_KM {
@@ -641,16 +598,38 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
         ExInitializeWorkItem(g_pPollingWorkItem, KmPollingWorkItemCallback, NULL);
         ExQueueWorkItem(g_pPollingWorkItem, DelayedWorkQueue);
         debug_print("[+] DiscoveryAndAttachmentThread: Polling work item queued.\n");
+
+        // Attempt to set the km_fully_initialized_flag in SharedCommBlock
+        if (g_um_shared_comm_block_ptr) { // Check if pointer is valid
+            // This is a write to user-mode memory. Use SafeWriteUmMemory.
+            // The target process for this write is the one we just attached to (target_eprocess_handshake).
+            ULONG flag_value = 1;
+            SIZE_T bytes_written_flag = 0;
+            NTSTATUS flag_write_status = SafeWriteUmMemory(
+                target_eprocess_handshake, // Process context for the write
+                &((SharedCommBlock*)g_um_shared_comm_block_ptr)->km_fully_initialized_flag,
+                &flag_value,
+                sizeof(ULONG),
+                &bytes_written_flag
+            );
+            if (NT_SUCCESS(flag_write_status) && bytes_written_flag == sizeof(ULONG)) {
+                debug_print("[+] DiscoveryAndAttachmentThread: Successfully set km_fully_initialized_flag in UM SharedCommBlock.\n");
+            } else {
+                debug_print("[-] DiscoveryAndAttachmentThread: Failed to set km_fully_initialized_flag. Status: 0x%X, BytesWritten: %zu\n", flag_write_status, bytes_written_flag);
+                // This is not fatal for KM operation but UM might timeout.
+            }
+        }
     } else {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to allocate polling work item. Polling will not start.\n");
         g_km_thread_should_run = FALSE;
         g_um_shared_comm_block_ptr = NULL;
         ObDereferenceObject(g_target_process); // Release the reference we just gave to g_target_process
         g_target_process = NULL;
+        // Do not attempt to set the flag if polling setup failed.
     }
     KeReleaseSpinLock(&g_comm_lock, oldIrql);
 
-    debug_print("[+] DiscoveryAndAttachmentThread: Setup successful. Thread will exit (polling is now independent).\n");
+    debug_print("[+] DiscoveryAndAttachmentThread: Setup process completed. Thread will exit (polling is now independent).\n");
 }
 
 VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
@@ -991,13 +970,78 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
             // Status will be set to KM_COMPLETED_SUCCESS by the common logic after the switch.
             break;
         }
+        case CommCommand::REQUEST_FREE_MEMORY: {
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - REQUEST_FREE_MEMORY.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+            if (km_slot_copy.param_size != (sizeof(UINT64) + sizeof(UINT64))) { // address (UINT64) + size (UINT64)
+                 km_slot_copy.result_status_code = STATUS_INFO_LENGTH_MISMATCH;
+                 debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Param size mismatch for FREE_MEMORY. Expected %zu, Got %u.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, (sizeof(UINT64) + sizeof(UINT64)), km_slot_copy.param_size);
+                 break;
+            }
+
+            UINT64 address_to_free_umva = 0;
+            UINT64 size_to_free_param = 0; // This size is from UM, KM will use 0 for MEM_RELEASE
+            memcpy(&address_to_free_umva, km_slot_copy.parameters, sizeof(UINT64));
+            memcpy(&size_to_free_param, km_slot_copy.parameters + sizeof(UINT64), sizeof(UINT64)); // UM sends size, but KM uses 0 for MEM_RELEASE
+
+            if (address_to_free_umva == 0) {
+                km_slot_copy.result_status_code = STATUS_INVALID_PARAMETER_1;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Address to free is NULL.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+                break;
+            }
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Addr: 0x%llX, Size (from UM, ignored for MEM_RELEASE): %llu.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, address_to_free_umva, size_to_free_param);
+
+            // command_target_eprocess is already looked up and valid at this point for the specified PID.
+            HANDLE target_process_handle_for_free = NULL;
+            status = ObOpenObjectByPointer(
+                command_target_eprocess, // PEPROCESS object
+                OBJ_KERNEL_HANDLE,       // HandleAttributes
+                NULL,                    // PassedAccessState
+                PROCESS_VM_OPERATION,    // DesiredAccess
+                *PsProcessType,          // ObjectType
+                KernelMode,              // AccessMode
+                &target_process_handle_for_free
+            );
+
+            if (!NT_SUCCESS(status) || target_process_handle_for_free == NULL) {
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to open handle to target process %llu for ZwFreeVirtualMemory. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id, status);
+                km_slot_copy.result_status_code = status;
+                break;
+            }
+
+            PVOID address_to_free_ptr = reinterpret_cast<PVOID>(address_to_free_umva);
+            SIZE_T region_size_for_release = 0; // For MEM_RELEASE, size must be 0. The entire region is freed.
+
+            // Attach to process context for ZwFreeVirtualMemory (though with a handle, might not be strictly needed, it's safer)
+            KAPC_STATE apc_state_free;
+            KeStackAttachProcess(command_target_eprocess, &apc_state_free);
+
+            status = ZwFreeVirtualMemory(
+                target_process_handle_for_free,
+                &address_to_free_ptr,    // Base address of the region
+                &region_size_for_release, // Size of the region to be freed, MUST BE 0 for MEM_RELEASE
+                MEM_RELEASE              // Release type
+            );
+
+            KeUnstackDetachProcess(&apc_state_free);
+            ZwClose(target_process_handle_for_free);
+
+            if (NT_SUCCESS(status)) {
+                km_slot_copy.result_status_code = STATUS_SUCCESS;
+                km_slot_copy.output_size = 0;
+                debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Memory at 0x%llX freed successfully.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, address_to_free_umva);
+            } else {
+                km_slot_copy.result_status_code = status;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - ZwFreeVirtualMemory failed for 0x%llX. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, address_to_free_umva, status);
+            }
+            break;
+        }
         default:
             km_slot_copy.result_status_code = STATUS_NOT_IMPLEMENTED;
             debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Unimplemented command_id.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
             break;
     }
 
-        if (command_target_eprocess) {
+        if (command_target_eprocess) { // This is the EPROCESS object from PsLookupProcessByProcessId
             ObDereferenceObject(command_target_eprocess);
             command_target_eprocess = NULL;
         }
@@ -1361,15 +1405,15 @@ static void chacha20_process_km(const UINT8* key, const UINT8* nonce, UINT32 non
 // --- END: Globals for Polling Work Item ---
 
 #define IOCTL_STEALTH_HANDSHAKE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define BEACON_PATTERN_SIZE_KM 16
+#define BEACON_PATTERN_SIZE_KM 16 // This should match BEACON_PATTERN_SIZE in UM StealthComm.h if they are the same concept
 
 typedef struct _STEALTH_HANDSHAKE_DATA {
     PVOID ObfuscatedPtrStruct1HeadUmAddress;
     UINT64 VerificationToken;
-    UINT8 BeaconPattern[BEACON_PATTERN_SIZE_KM];
+    UINT8 BeaconPattern[BEACON_PATTERN_SIZE_KM]; // Ensure this size is consistent with UM's BeaconPattern
 } STEALTH_HANDSHAKE_DATA, *PSTEALTH_HANDSHAKE_DATA;
 
-UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM];
+UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM]; // Ensure size consistency
 UINT64 g_received_um_verification_token = 0;
 // const UINT64 SOME_PREDEFINED_CONSTANT_FOR_TOKEN_KM = 0xCAFEFEEDDEAFBEEFULL; // Removed, shared secret will be g_km_dynamic_obfuscation_xor_key
 
@@ -1377,51 +1421,11 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext); // Forward declaration
 NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp); // Forward declaration
 
 
-ULONG       g_max_comm_slots = 4;
+// ULONG       g_max_comm_slots = 4; // Now defined via MAX_COMM_SLOTS_KM in includes.h
 
-enum class CommCommand : uint32_t {
-    REQUEST_NOP = 0,
-    REQUEST_READ_MEMORY,
-    REQUEST_WRITE_MEMORY,
-    REQUEST_GET_MODULE_BASE,
-    REQUEST_AOB_SCAN,
-    REQUEST_ALLOCATE_MEMORY,
-};
+// CommCommand, SlotStatus, CommunicationSlot, SharedCommBlock are now defined in includes.h
 
-enum class SlotStatus : uint32_t {
-    EMPTY = 0,
-    UM_REQUEST_PENDING,
-    KM_PROCESSING_REQUEST,
-    KM_COMPLETED_SUCCESS,
-    KM_COMPLETED_ERROR,
-    UM_ACKNOWLEDGED
-};
-
-#pragma pack(push, 1)
-struct CommunicationSlot {
-    volatile SlotStatus status;
-    uint32_t request_id;
-    CommCommand command_id;
-    uint64_t process_id;
-    uint8_t parameters[256];
-    uint32_t param_size;
-    uint8_t output[256];
-    uint32_t output_size;
-    uint64_t result_status_code;
-    uint8_t nonce[12];
-    uint8_t mac_tag[16];
-};
-
-struct SharedCommBlock {
-    volatile uint64_t signature;
-    volatile uint32_t um_slot_index;
-    volatile uint32_t km_slot_index;
-    CommunicationSlot slots[4];
-    volatile uint64_t honeypot_field;
-};
-#pragma pack(pop)
-
-// struct SharedCommBlock defined above
+// struct SharedCommBlock defined in includes.h
 
 #pragma pack(push, 1)
 struct PtrStruct4_KM {

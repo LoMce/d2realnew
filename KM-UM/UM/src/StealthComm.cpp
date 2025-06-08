@@ -273,6 +273,7 @@ namespace StealthComm {
         g_shared_comm_block->um_slot_index = ObfuscateSlotIndex_UM(0, derived_index_xor_key_um_init);
         g_shared_comm_block->km_slot_index = 0;
         g_shared_comm_block->honeypot_field = 0xABADC0DED00DFEEDULL; // KM Expected Value
+        g_shared_comm_block->km_fully_initialized_flag = 0; // Explicitly initialize to 0
 
         for (int i = 0; i < MAX_COMM_SLOTS; ++i) {
             g_shared_comm_block->slots[i].status = SlotStatus::EMPTY;
@@ -335,7 +336,33 @@ namespace StealthComm {
             ShutdownStealthComm();
             return false;
         }
-        std::cout << "[+] InitializeStealthComm: StealthComm fully initialized including UM->KM handshake." << std::endl;
+
+        // Poll for KM ready flag
+        bool km_ready = false;
+        const int timeout_ms = 2000; // Max 2 seconds wait
+        const int poll_interval_ms = 100;
+        int elapsed_ms = 0;
+
+        std::cout << "[+] InitializeStealthComm: Handshake IOCTL sent. Waiting for KM ready signal..." << std::endl;
+
+        while (elapsed_ms < timeout_ms) {
+            if (g_shared_comm_block->km_fully_initialized_flag == 1) {
+                km_ready = true;
+                break;
+            }
+            Sleep(poll_interval_ms);
+            elapsed_ms += poll_interval_ms;
+        }
+
+        if (!km_ready) {
+            std::cerr << "[-] InitializeStealthComm: Timed out waiting for KM to set km_fully_initialized_flag." << std::endl;
+            // Consider if a disconnect IOCTL should be sent here if one existed for aborting setup.
+            // For now, just shut down UM side.
+            ShutdownStealthComm(); // Clean up UM resources
+            return false;
+        }
+
+        std::cout << "[+] InitializeStealthComm: KM ready signal received. StealthComm fully initialized." << std::endl;
         return true;
     }
 
@@ -771,4 +798,481 @@ namespace StealthComm {
         if (g_ptr_struct4_um) { VirtualFree(g_ptr_struct4_um, 0, MEM_RELEASE); g_ptr_struct4_um = nullptr; }
         if (g_shared_comm_block) { VirtualFree(g_shared_comm_block, 0, MEM_RELEASE); g_shared_comm_block = nullptr; }
     }
+
+    bool FreeMemory(uint64_t target_pid, uintptr_t address, size_t size) {
+        if (address == 0) {
+            std::cerr << "[-] FreeMemory: Address cannot be zero." << std::endl;
+            return false;
+        }
+        // Size is passed to KM, but KM's ZwFreeVirtualMemory with MEM_RELEASE will use 0 for size.
+        // We still send the original allocation size for potential logging or future use if KM changes.
+        uint8_t params[sizeof(uintptr_t) + sizeof(size_t)];
+        uint32_t params_size = 0;
+        Serialize_uint64(params, address);
+        params_size += sizeof(uintptr_t);
+        Serialize_uint64(params + params_size, size);
+        params_size += sizeof(size_t);
+
+        uint8_t output_buf[1]; // No real output expected
+        uint32_t output_size_in_out = 0;
+        uint64_t km_status_code = 0;
+
+        bool success = SubmitRequestAndWait(
+            CommCommand::REQUEST_FREE_MEMORY, target_pid, params, params_size,
+            output_buf, output_size_in_out, km_status_code);
+
+        if (!success || !MY_NT_SUCCESS(km_status_code)) {
+            std::cerr << "[-] FreeMemory: Failed to free memory at address 0x" << std::hex << address
+                      << std::dec << ". KM Status: 0x" << std::hex << km_status_code << std::dec << std::endl;
+            return false;
+        }
+        #ifdef _DEBUG
+        std::cout << "[+] FreeMemory: Successfully requested KM to free memory at 0x" << std::hex << address << std::dec << std::endl;
+        #endif
+        return true;
+    }
+
+    // Note: km_status_code from slot is now directly returned if KM_COMPLETED_ERROR.
+    // If timeout or other UM-side issue, specific NTSTATUS codes are returned.
+    NTSTATUS SubmitRequestAndWait( // Changed return type
+        CommCommand command, uint64_t target_pid, const uint8_t* params, uint32_t params_size,
+        uint8_t* output_buf, uint32_t& output_size, // output_size is In/Out
+        /*uint64_t& km_status_code,*/ uint32_t timeout_ms) // km_status_code removed from params, will be return value
+    {
+        if (!g_shared_comm_block) {
+            std::cerr << "[-] SubmitRequestAndWait: Shared communication block not initialized for ReqID " << g_next_request_id.load() << "." << std::endl;
+            return STATUS_INVALID_DEVICE_STATE; // Or a custom error
+        }
+        if (params_size > MAX_PARAM_SIZE) {
+            std::cerr << "[-] SubmitRequestAndWait: Params size " << params_size << " too large for ReqID " << g_next_request_id.load() << "." << std::endl;
+            return STATUS_INVALID_BUFFER_SIZE; // Or a custom error
+        }
+
+        uint32_t request_id = g_next_request_id.fetch_add(1);
+        uint64_t sig_um_runtime = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature;
+        uint32_t derived_index_xor_key_um_runtime = (uint32_t)(sig_um_runtime & 0xFFFFFFFF) ^ (uint32_t)(sig_um_runtime >> 32);
+
+        if (g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature == 0) {
+             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_shared_comm_block_signature is 0. Cannot manage slot indices.\n";
+            return STATUS_INVALID_DEVICE_STATE;
+        }
+        if (g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key == 0) {
+             std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - dynamic_obfuscation_xor_key is 0. Cannot derive crypto keys." << std::endl;
+            return STATUS_INVALID_KEY;
+        }
+
+        uint32_t obfuscated_um_slot_index_read = g_shared_comm_block->um_slot_index;
+        uint32_t current_um_slot_index_plain = DeobfuscateSlotIndex_UM(obfuscated_um_slot_index_read, derived_index_xor_key_um_runtime);
+
+        CommunicationSlot* slot = nullptr;
+        bool slot_found = false;
+        uint32_t actual_slot_index_plain = 0;
+
+        for (int i = 0; i < MAX_COMM_SLOTS; ++i) {
+            uint32_t try_index_plain = (current_um_slot_index_plain + i) % MAX_COMM_SLOTS;
+            SlotStatus current_status_atomic = static_cast<SlotStatus>(InterlockedCompareExchange(
+                reinterpret_cast<volatile LONG*>(&g_shared_comm_block->slots[try_index_plain].status),
+                static_cast<LONG>(SlotStatus::UM_REQUEST_PENDING),
+                static_cast<LONG>(SlotStatus::EMPTY)
+            ));
+
+            if (current_status_atomic == SlotStatus::EMPTY) {
+                slot = &g_shared_comm_block->slots[try_index_plain];
+                actual_slot_index_plain = try_index_plain;
+                slot_found = true;
+                break;
+            } else {
+                 current_status_atomic = static_cast<SlotStatus>(InterlockedCompareExchange(
+                    reinterpret_cast<volatile LONG*>(&g_shared_comm_block->slots[try_index_plain].status),
+                    static_cast<LONG>(SlotStatus::UM_REQUEST_PENDING),
+                    static_cast<LONG>(SlotStatus::UM_ACKNOWLEDGED)
+                ));
+                 if (current_status_atomic == SlotStatus::UM_ACKNOWLEDGED) {
+                    slot = &g_shared_comm_block->slots[try_index_plain];
+                    actual_slot_index_plain = try_index_plain;
+                    slot_found = true;
+                    break;
+                 }
+            }
+        }
+
+        if (!slot_found) {
+            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - No free communication slot available. Start search plain index: " << current_um_slot_index_plain << std::endl;
+            return STATUS_NO_MEMORY; // Or a more specific "no available slot" error
+        }
+
+        uint8_t current_chacha_key_um[32];
+        DeriveKeys_UM(g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key, request_id, current_chacha_key_um);
+
+        slot->request_id = request_id;
+        slot->command_id = command;
+        slot->process_id = target_pid;
+
+        GenerateNonce_UM(slot->nonce, sizeof(slot->nonce), request_id);
+
+        uint8_t aad_buffer_request[20];
+        uint32_t current_offset = 0;
+        memcpy(aad_buffer_request + current_offset, &request_id, sizeof(request_id));
+        current_offset += sizeof(request_id);
+        memcpy(aad_buffer_request + current_offset, &command, sizeof(command));
+        current_offset += sizeof(command);
+        memcpy(aad_buffer_request + current_offset, &target_pid, sizeof(target_pid));
+        current_offset += sizeof(target_pid);
+        memcpy(aad_buffer_request + current_offset, &params_size, sizeof(params_size));
+        current_offset += sizeof(params_size);
+
+        if (params && params_size > 0) {
+            memcpy(slot->parameters, params, params_size);
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, slot->parameters, params_size, slot->parameters, slot->mac_tag);
+        } else {
+            StandardLib_ChaCha20_Encrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_request, current_offset, nullptr, 0, nullptr, slot->mac_tag);
+        }
+        slot->param_size = params_size;
+        slot->output_size = 0; // Initialize output size for KM
+        slot->result_status_code = STATUS_PENDING; // Initial status
+
+        uint32_t next_um_slot_index_plain = (actual_slot_index_plain + 1) % MAX_COMM_SLOTS;
+        uint32_t obfuscated_next_um_slot_index = ObfuscateSlotIndex_UM(next_um_slot_index_plain, derived_index_xor_key_um_runtime);
+        g_shared_comm_block->um_slot_index = obfuscated_next_um_slot_index;
+
+        DWORD start_time = GetTickCount();
+        bool processed_response = false;
+        NTSTATUS final_status = STATUS_UNSUCCESSFUL; // Default to unsuccessful
+
+        while (GetTickCount() - start_time < timeout_ms) {
+            SlotStatus current_slot_status_volatile = slot->status; // Read volatile once
+            if (current_slot_status_volatile == SlotStatus::KM_COMPLETED_SUCCESS || current_slot_status_volatile == SlotStatus::KM_COMPLETED_ERROR) {
+                if (slot->request_id != request_id) {
+                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Mismatched request ID in slot! Expected " << request_id << ", Got " << slot->request_id << ". Critical error." << std::endl;
+                    final_status = STATUS_DATA_ERROR; // Critical error
+                    // Do not change slot status here, let UM_ACKNOWLEDGED handle it if possible
+                    processed_response = true; // Break loop, error state
+                    break;
+                }
+
+                final_status = static_cast<NTSTATUS>(slot->result_status_code);
+                uint32_t max_output_buf_size = output_size;
+                output_size = 0;
+
+                uint8_t aad_buffer_response[16];
+                uint32_t response_aad_offset = 0;
+                memcpy(aad_buffer_response + response_aad_offset, &slot->request_id, sizeof(slot->request_id));
+                response_aad_offset += sizeof(slot->request_id);
+                memcpy(aad_buffer_response + response_aad_offset, &slot->output_size, sizeof(slot->output_size));
+                response_aad_offset += sizeof(slot->output_size);
+                memcpy(aad_buffer_response + response_aad_offset, &slot->result_status_code, sizeof(slot->result_status_code));
+                response_aad_offset += sizeof(slot->result_status_code);
+
+                bool decryption_ok = false;
+                if (slot->output_size > 0 && slot->output_size <= MAX_OUTPUT_SIZE_KM) { // Check against KM max
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, slot->output, slot->output_size, slot->output, slot->mac_tag);
+                } else if (slot->output_size == 0) {
+                    uint8_t dummy_plaintext;
+                    decryption_ok = StandardLib_ChaCha20_Decrypt_UM(current_chacha_key_um, slot->nonce, aad_buffer_response, response_aad_offset, nullptr, 0, &dummy_plaintext, slot->mac_tag);
+                } else { // output_size > MAX_OUTPUT_SIZE_KM
+                     std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - KM returned output_size (" << slot->output_size << ") > MAX_OUTPUT_SIZE_KM (" << MAX_OUTPUT_SIZE_KM << ")." << std::endl;
+                     final_status = STATUS_BUFFER_OVERFLOW; // Or similar error
+                     decryption_ok = false; // Cannot proceed with decryption
+                }
+
+
+                if (!decryption_ok) {
+                    std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - RESPONSE DECRYPTION/TAG VERIFICATION FAILED." << std::endl;
+                    if (NT_SUCCESS(final_status)) { // If KM reported success but decryption failed
+                        final_status = STATUS_MAC_INCORRECT; // More specific error
+                    }
+                } else {
+                    if (NT_SUCCESS(final_status)) { // KM success and decryption success
+                        if (output_buf && max_output_buf_size > 0 && slot->output_size > 0) {
+                            uint32_t copy_size = min(max_output_buf_size, slot->output_size);
+                            memcpy(output_buf, slot->output, copy_size);
+                            output_size = copy_size;
+                        } else {
+                            output_size = 0;
+                        }
+                    } else { // KM error, but decryption was okay (e.g. tag verified for 0 output)
+                         output_size = 0;
+                    }
+                }
+                processed_response = true;
+                break;
+            }
+            Sleep(5); // Polling interval
+        }
+
+        volatile PVOID p_key = current_chacha_key_um;
+        memset((PVOID)p_key, 0, sizeof(current_chacha_key_um));
+
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(&slot->status), static_cast<LONG>(SlotStatus::UM_ACKNOWLEDGED));
+
+        if (!processed_response) {
+            std::cerr << "[-] SubmitRequestAndWait: ReqID " << request_id << " - Request timed out." << std::endl;
+            return STATUS_TIMEOUT;
+        }
+
+        return final_status;
+    }
+
+    NTSTATUS ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read) {
+        if (bytes_read) *bytes_read = 0;
+        if (!buffer || size == 0) {
+            std::cerr << "[-] ReadMemory: Invalid buffer or zero size." << std::endl;
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        uint8_t params[sizeof(uintptr_t) + sizeof(size_t)];
+        uint32_t params_size = 0;
+        Serialize_uint64(params, address);
+        params_size += sizeof(uintptr_t);
+        Serialize_uint64(params + params_size, size);
+        params_size += sizeof(size_t);
+
+        // Output buffer is managed by this function, not directly by slot.
+        // Max output size for read is MAX_OUTPUT_SIZE (256 bytes) per slot.
+        // If requested size > MAX_OUTPUT_SIZE, this simple wrapper needs adjustment
+        // or the KM needs to handle chunking (which it doesn't currently).
+        // For now, assume 'size' will be <= MAX_OUTPUT_SIZE.
+        if (size > MAX_OUTPUT_SIZE_KM) { // Check against KM's max output
+            std::cerr << "[-] ReadMemory: Requested read size " << size << " exceeds MAX_OUTPUT_SIZE_KM " << MAX_OUTPUT_SIZE_KM << "." << std::endl;
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        uint8_t temp_output_buf[MAX_OUTPUT_SIZE_KM]; // Use KM's max
+        uint32_t actual_read_by_km_or_slot_max = MAX_OUTPUT_SIZE_KM; // Pass max capacity of temp_output_buf
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_READ_MEMORY, target_pid, params, params_size,
+            temp_output_buf, actual_read_by_km_or_slot_max /* In: buffer capacity, Out: actual data size from KM */);
+
+        if (NT_SUCCESS(status)) {
+            // actual_read_by_km_or_slot_max now holds the actual number of bytes placed in temp_output_buf by SubmitRequestAndWait
+            if (actual_read_by_km_or_slot_max <= size) { // Should be equal to 'size' if KM read 'size' bytes
+                if (bytes_read) *bytes_read = actual_read_by_km_or_slot_max;
+                memcpy(buffer, temp_output_buf, actual_read_by_km_or_slot_max);
+            } else {
+                 // This case should ideally not happen if KM respects the requested size and slot limits.
+                 std::cerr << "[-] ReadMemory: SubmitRequestAndWait returned more data (" << actual_read_by_km_or_slot_max
+                           << ") than requested size (" << size << ") or slot capacity." << std::endl;
+                 if (bytes_read) *bytes_read = 0; // Indicate error or partial/no data
+                 return STATUS_INTERNAL_ERROR; // Or some other error
+            }
+        } else {
+             // Log specific error from SubmitRequestAndWait if needed, but it already logs.
+        }
+        return status;
+    }
+
+    NTSTATUS WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written) {
+        if (bytes_written) *bytes_written = 0;
+        if (!buffer || size == 0) {
+            std::cerr << "[-] WriteMemory: Invalid buffer or zero size." << std::endl;
+            return STATUS_INVALID_PARAMETER;
+        }
+        // Param buffer for write: address (u64) + size_to_write (u64) + data_itself (up to MAX_PARAM_SIZE - headers)
+        if (size > (MAX_PARAM_SIZE_KM - (sizeof(uintptr_t) + sizeof(size_t)))) {
+             std::cerr << "[-] WriteMemory: Data size " << size << " too large for params buffer." << std::endl;
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        uint8_t params[MAX_PARAM_SIZE_KM];
+        uint32_t params_size = 0;
+        Serialize_uint64(params, address);
+        params_size += sizeof(uintptr_t);
+        Serialize_uint64(params + params_size, size); // Tell KM how much data is being sent
+        params_size += sizeof(size_t);
+        memcpy(params + params_size, buffer, size);
+        params_size += static_cast<uint32_t>(size);
+
+        uint8_t temp_output_buf[1]; // KM's REQUEST_WRITE_MEMORY might return bytes_written in output
+        uint32_t output_data_len = 0; // In: capacity (0 is fine if no data expected), Out: actual output size
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_WRITE_MEMORY, target_pid, params, params_size,
+            temp_output_buf, output_data_len);
+
+        if (NT_SUCCESS(status)) {
+            // KM's current REQUEST_WRITE_MEMORY sets output_size = size_to_write on success.
+            if (output_data_len == size) { // Check if KM confirmed writing 'size' bytes.
+                if (bytes_written) *bytes_written = size; // KM is expected to write all or fail.
+            } else {
+                // This might indicate an issue if KM wrote less than requested but reported success.
+                // Or if output_data_len was not set as expected.
+                std::cerr << "[-] WriteMemory: KM success but output_data_len (" << output_data_len
+                          << ") != requested size (" << size << ")." << std::endl;
+                if (bytes_written) *bytes_written = output_data_len; // Report what KM claimed
+                // Consider returning an error if this mismatch is critical
+            }
+        }
+        return status;
+    }
+
+    uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name) {
+        if (!module_name || module_name[0] == L'\0') {
+            std::cerr << "[-] GetModuleBase: Invalid module name." << std::endl;
+            return 0; // Keep returning 0 for error in this specific wrapper for now
+        }
+        uint8_t params[MAX_PARAM_SIZE_KM];
+        uint32_t params_size = 0;
+        // Custom serialization for wstring to ensure it fits and is null-terminated.
+        size_t module_name_len_bytes = (wcslen(module_name) + 1) * sizeof(wchar_t);
+        if (module_name_len_bytes > MAX_PARAM_SIZE_KM) {
+            std::wcerr << L"[-] GetModuleBase: Module name '" << module_name << L"' too long." << std::endl;
+            return 0;
+        }
+        memcpy(params, module_name, module_name_len_bytes);
+        params_size = static_cast<uint32_t>(module_name_len_bytes);
+
+
+        uint8_t output_buf[sizeof(uintptr_t)];
+        uint32_t output_size_in_out = sizeof(uintptr_t); // Expecting a uintptr_t back
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_GET_MODULE_BASE, target_pid, params, params_size,
+            output_buf, output_size_in_out);
+
+        if (NT_SUCCESS(status)) {
+            if (output_size_in_out == sizeof(uintptr_t)) {
+                 uintptr_t module_base = Deserialize_uint64(output_buf);
+                 return module_base;
+            } else {
+                std::wcerr << L"[-] GetModuleBase: KM success but output_size (" << output_size_in_out
+                          << L") != sizeof(uintptr_t) for module " << module_name << L"." << std::endl;
+                return 0;
+            }
+        }
+        // Log specific error from SubmitRequestAndWait if needed.
+        // SubmitRequestAndWait or KM might have already logged.
+        // Only log if status is an error and not a "not found" type error for this one.
+        if (!NT_SUCCESS(status) && !(status == 0xC0000034L /*STATUS_OBJECT_NAME_NOT_FOUND typically from ObReferenceObjectByName*/ || status == 0xC0000225L /*STATUS_NOT_FOUND*/ ) ) {
+             std::wcerr << L"[-] GetModuleBase: KM returned error status: 0x" << std::hex << status << std::dec << L" for module " << module_name << std::endl;
+        }
+        return 0;
+    }
+
+    uintptr_t AobScan(uint64_t target_pid, uintptr_t start_address, size_t scan_size,
+                      const char* pattern, const char* mask,
+                      uint8_t* out_saved_bytes, size_t saved_bytes_size) {
+        UNREFERENCED_PARAMETER(mask); // Mask is not used by current KM AOB scan
+        UNREFERENCED_PARAMETER(out_saved_bytes); // Not filled by current KM AOB scan
+        UNREFERENCED_PARAMETER(saved_bytes_size);
+
+        if (!pattern || pattern[0] == '\0') {
+            std::cerr << "[-] AobScan: Invalid or empty pattern." << std::endl;
+            return 0;
+        }
+
+        uint8_t params[MAX_PARAM_SIZE_KM];
+        uint32_t current_offset = 0;
+        Serialize_uint64(params + current_offset, start_address);
+        current_offset += sizeof(uintptr_t);
+        Serialize_uint64(params + current_offset, scan_size);
+        current_offset += sizeof(size_t);
+
+        size_t pattern_str_len = strlen(pattern) + 1; // Include null terminator
+        if (current_offset + pattern_str_len > MAX_PARAM_SIZE_KM) {
+            std::cerr << "[-] AobScan: Pattern string too long for parameters buffer." << std::endl;
+            return 0;
+        }
+        memcpy(params + current_offset, pattern, pattern_str_len);
+        current_offset += static_cast<uint32_t>(pattern_str_len);
+
+        uint8_t output_buf[sizeof(uintptr_t)];
+        uint32_t output_buf_capacity = sizeof(uintptr_t); // Expecting a uintptr_t back
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_AOB_SCAN, target_pid, params, current_offset,
+            output_buf, output_buf_capacity);
+
+        if (NT_SUCCESS(status)) {
+            if (output_buf_capacity == sizeof(uintptr_t)) { // Found
+                uintptr_t found_address = Deserialize_uint64(output_buf);
+                return found_address;
+            } else if (output_buf_capacity == 0 && NT_SUCCESS(status)) { // Not found but KM call was success
+                 return 0;
+            } else { // Unexpected output size
+                std::cerr << "[-] AobScan: KM success but returned unexpected output_size (" << output_buf_capacity
+                          << "). Expected sizeof(uintptr_t) or 0." << std::endl;
+                return 0;
+            }
+        }
+        // Only log if status is an error and not a "not found" type error for this one.
+        if (!NT_SUCCESS(status) && !(status == 0xC0000034L || status == 0xC0000225L )) {
+             std::cerr << "[-] AobScan: KM returned error status: 0x" << std::hex << status << std::dec
+                      << " for pattern \"" << pattern << "\"." << std::endl;
+        }
+        return 0;
+    }
+
+    uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address) {
+        if (size == 0) {
+            std::cerr << "[-] AllocateMemory: Allocation size cannot be zero." << std::endl;
+            return 0;
+        }
+        uint8_t params[sizeof(uint64_t) + sizeof(uintptr_t)];
+        uint32_t params_size = 0;
+        Serialize_uint64(params, size); // First param: size
+        params_size += sizeof(uint64_t);
+        Serialize_uint64(params + params_size, hint_address); // Second param: hint_address
+        params_size += sizeof(uintptr_t);
+
+        uint8_t output_buf[sizeof(uintptr_t)];
+        uint32_t output_size_in_out = sizeof(uintptr_t);
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_ALLOCATE_MEMORY, target_pid, params, params_size,
+            output_buf, output_size_in_out);
+
+        if (NT_SUCCESS(status)) {
+            if (output_size_in_out == sizeof(uintptr_t)) {
+                uintptr_t allocated_address = Deserialize_uint64(output_buf);
+                if (allocated_address != 0) {
+                    return allocated_address;
+                } else { // KM success but returned 0, unusual
+                    std::cerr << "[-] AllocateMemory: KM reported success but returned allocated address 0 for size " << size << "." << std::endl;
+                    return 0;
+                }
+            } else {
+                 std::cerr << "[-] AllocateMemory: KM success but returned unexpected output_size (" << output_size_in_out
+                          << "). Expected sizeof(uintptr_t)." << std::endl;
+                return 0;
+            }
+        }
+        // Log specific error from SubmitRequestAndWait if needed.
+        return 0;
+    }
+
+    NTSTATUS FreeMemory(uint64_t target_pid, uintptr_t address, size_t size) { // Return NTSTATUS
+        if (address == 0) {
+            std::cerr << "[-] FreeMemory: Address cannot be zero." << std::endl;
+            return STATUS_INVALID_PARAMETER_2; // Address is param 2 conceptually after PID
+        }
+
+        uint8_t params[sizeof(uintptr_t) + sizeof(size_t)];
+        uint32_t params_size = 0;
+        Serialize_uint64(params, address);
+        params_size += sizeof(uintptr_t);
+        Serialize_uint64(params + params_size, size); // KM expects size 0 for MEM_RELEASE, but we send what UM provides.
+        params_size += sizeof(size_t);
+
+        uint8_t output_buf[1];
+        uint32_t output_size_in_out = 0;
+
+        NTSTATUS status = SubmitRequestAndWait(
+            CommCommand::REQUEST_FREE_MEMORY, target_pid, params, params_size,
+            output_buf, output_size_in_out);
+
+        // SubmitRequestAndWait already logs general errors like timeout.
+        // We might log specific failure for FreeMemory if status is an error.
+        if (!NT_SUCCESS(status)) {
+            std::cerr << "[-] FreeMemory: Failed to free memory at address 0x" << std::hex << address
+                      << std::dec << ". Status: 0x" << std::hex << status << std::dec << std::endl;
+        }
+        #ifdef _DEBUG
+        else { // Only log success in debug
+             std::cout << "[+] FreeMemory: Successfully requested KM to free memory at 0x" << std::hex << address << std::dec << std::endl;
+        }
+        #endif
+        return status;
+    }
+
 } // namespace StealthComm
