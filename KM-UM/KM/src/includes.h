@@ -170,12 +170,67 @@ extern HANDLE g_km_setup_thread_handle;
 // Pointer to the allocated work item
 extern PIO_WORKITEM g_polling_work_item;
 
+// --- START: Shared Communication Structures ---
+// These enums and structs are shared between KM and UM.
+
+#define MAX_COMM_SLOTS_KM 4 // Using a KM-specific define if needed, or ensure UM's MAX_COMM_SLOTS is consistent
+#define MAX_PARAM_SIZE_KM 256
+#define MAX_OUTPUT_SIZE_KM 256
+
+enum class CommCommand : uint32_t {
+    REQUEST_NOP = 0,
+    REQUEST_READ_MEMORY,
+    REQUEST_WRITE_MEMORY,
+    REQUEST_GET_MODULE_BASE,
+    REQUEST_AOB_SCAN,
+    REQUEST_ALLOCATE_MEMORY,
+    REQUEST_DISCONNECT,
+    REQUEST_FREE_MEMORY, // Added for freeing memory
+};
+
+enum class SlotStatus : uint32_t {
+    EMPTY = 0,
+    UM_REQUEST_PENDING,
+    KM_PROCESSING_REQUEST,
+    KM_COMPLETED_SUCCESS,
+    KM_COMPLETED_ERROR,
+    UM_ACKNOWLEDGED
+};
+
+#pragma pack(push, 1)
+struct CommunicationSlot {
+    volatile SlotStatus status;
+    uint32_t request_id;
+    CommCommand command_id;
+    uint64_t process_id;
+    uint8_t parameters[MAX_PARAM_SIZE_KM];
+    uint32_t param_size;
+    uint8_t output[MAX_OUTPUT_SIZE_KM];
+    uint32_t output_size;
+    uint64_t result_status_code;
+    uint8_t nonce[12];
+    uint8_t mac_tag[16]; // Changed from mac to mac_tag to match UM
+};
+
+struct SharedCommBlock {
+    volatile uint64_t signature;
+    volatile uint32_t um_slot_index;
+    volatile uint32_t km_slot_index;
+    CommunicationSlot slots[MAX_COMM_SLOTS_KM]; // Use defined constant
+    volatile uint64_t honeypot_field;
+    volatile ULONG km_fully_initialized_flag; // Added for KM ready signal
+};
+#pragma pack(pop)
+
+// --- END: Shared Communication Structures ---
+
+
 // Shared communication related globals (already defined in main.cpp, declared here for access)
 // These are already in main.cpp, ensure they are declared extern if needed across files,
 // but for now, this subtask focuses on main.cpp and includes.h for these specific new declarations.
 // extern PEPROCESS g_target_process;
-// extern PVOID g_um_shared_comm_block_ptr;
+// extern PVOID g_um_shared_comm_block_ptr; // This is a UM VA, KM should not dereference directly without care
 // extern KSPIN_LOCK g_comm_lock;
 // extern BOOLEAN g_km_thread_should_run;
-// extern ULONG_PTR g_shared_comm_block_signature;
-// extern ULONG g_max_comm_slots;
+// extern ULONG_PTR g_shared_comm_block_signature; // This is g_km_dynamic_shared_comm_block_signature
+// extern ULONG g_max_comm_slots; // This is MAX_COMM_SLOTS_KM
