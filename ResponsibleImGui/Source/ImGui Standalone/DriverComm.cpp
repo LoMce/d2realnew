@@ -1,8 +1,9 @@
 #include "DriverComm.h"
 #include <Windows.h>
 // #include <TlHelp32.h> // Not needed here if get_process_id is external to DriverComm
-#include <iostream>
+// #include <iostream> // Replaced by Logging.h
 #include <cstring> // For memcpy, wcslen, etc.
+#include "Logging.h" // Added Logging.h
 // StealthComm.h is included via DriverComm.h
 
 namespace DriverComm {
@@ -11,26 +12,22 @@ namespace DriverComm {
 
     NTSTATUS attach_to_process(const DWORD pid_to_attach) { // Returns NTSTATUS
         if (pid_to_attach == 0) {
-            std::cerr << "[-] DriverComm::attach_to_process: Invalid PID (0)." << std::endl;
+            LogMessage("[-] DriverComm::attach_to_process: Invalid PID (0).");
             return STATUS_INVALID_PARAMETER_1; // Using common NTSTATUS codes
         }
         // StealthComm::InitializeStealthComm now returns NTSTATUS
-        NTSTATUS status = StealthComm::InitializeStealthComm();
-        if (!NT_SUCCESS(status)) {
-            std::cerr << "[-] DriverComm::attach_to_process: StealthComm::InitializeStealthComm() failed with status 0x" << std::hex << status << std::dec << std::endl;
-            return status;
+        NTSTATUS init_status = StealthComm::InitializeStealthComm(); // Changed variable name for clarity
+        if (!NT_SUCCESS(init_status)) {
+            LogMessageF("[-] DriverComm::attach_to_process: StealthComm::InitializeStealthComm() failed with status 0x%lX", init_status);
+            return init_status; // Propagate the failure status
         }
         DriverComm::g_pid = pid_to_attach;
-        #ifdef _DEBUG
-        std::cout << "[+] DriverComm::attach_to_process: Successfully initialized StealthComm and attached to PID: " << pid_to_attach << std::endl;
-        #endif
+        LogMessageF("[+] DriverComm::attach_to_process: Successfully initialized StealthComm and attached to PID: %lu", pid_to_attach);
         return STATUS_SUCCESS;
     }
 
     void shutdown() {
-        #ifdef _DEBUG
-        std::cout << "[+] DriverComm::shutdown: Shutting down StealthComm..." << std::endl;
-        #endif
+        LogMessage("[+] DriverComm::shutdown: Shutting down StealthComm...");
         StealthComm::ShutdownStealthComm();
         DriverComm::g_pid = 0; // Reset PID
     }
@@ -39,14 +36,14 @@ namespace DriverComm {
     NTSTATUS read_memory(const std::uintptr_t addr, T& out_value) {
         out_value = {}; // Initialize to default
         if (DriverComm::g_pid == 0) {
-            #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::read_memory: Not attached (PID is 0)." << std::endl;
+            #ifdef _DEBUG // Keep existing _DEBUG conditional for these low-level/frequent messages
+            LogMessage("[-] DriverComm::read_memory: Not attached (PID is 0).");
             #endif
             return STATUS_INVALID_DEVICE_STATE;
         }
         if (addr == 0) {
             #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::read_memory: Attempted to read from NULL address." << std::endl;
+            LogMessage("[-] DriverComm::read_memory: Attempted to read from NULL address.");
             #endif
             return STATUS_INVALID_PARAMETER_1; // Address is param 1
         }
@@ -58,7 +55,7 @@ namespace DriverComm {
             // StealthComm::ReadMemory already logs its errors.
             // Log DriverComm specific context if needed.
             #ifdef _DEBUG
-            // std::cerr << "[-] DriverComm::read_memory: StealthComm::ReadMemory failed for address 0x" << std::hex << addr << " with status 0x" << status << std::dec << std::endl;
+            // LogMessageF("[-] DriverComm::read_memory: StealthComm::ReadMemory failed for address 0x%p with status 0x%lX", (void*)addr, status);
             #endif
             RtlZeroMemory(&out_value, sizeof(T)); // Zero out on failure
             return status;
@@ -66,8 +63,7 @@ namespace DriverComm {
 
         if (bytes_read != sizeof(T)) {
             #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::read_memory: Read size mismatch for address 0x" << std::hex << addr
-                      << std::dec << ". Expected " << sizeof(T) << ", Got " << bytes_read << std::endl;
+            LogMessageF("[-] DriverComm::read_memory: Read size mismatch for address 0x%p. Expected %zu, Got %zu", (void*)addr, sizeof(T), bytes_read);
             #endif
             RtlZeroMemory(&out_value, sizeof(T)); // Zero out on partial read for safety
             return STATUS_PARTIAL_COPY; // Or a more specific error
@@ -79,13 +75,13 @@ namespace DriverComm {
     NTSTATUS write_memory(const std::uintptr_t addr, const T& value) {
         if (DriverComm::g_pid == 0) {
             #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::write_memory: Not attached (PID is 0)." << std::endl;
+            LogMessage("[-] DriverComm::write_memory: Not attached (PID is 0).");
             #endif
             return STATUS_INVALID_DEVICE_STATE;
         }
          if (addr == 0) {
             #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::write_memory: Attempted to write to NULL address." << std::endl;
+            LogMessage("[-] DriverComm::write_memory: Attempted to write to NULL address.");
             #endif
             return STATUS_INVALID_PARAMETER_1;
         }
@@ -95,15 +91,14 @@ namespace DriverComm {
 
         if (!NT_SUCCESS(status)) {
             #ifdef _DEBUG
-            // std::cerr << "[-] DriverComm::write_memory: StealthComm::WriteMemory failed for address 0x" << std::hex << addr << " with status 0x" << status << std::dec << std::endl;
+            // LogMessageF("[-] DriverComm::write_memory: StealthComm::WriteMemory failed for address 0x%p with status 0x%lX", (void*)addr, status);
             #endif
             return status;
         }
 
         if (bytes_written != sizeof(T)) {
             #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::write_memory: Write size mismatch for address 0x" << std::hex << addr
-                      << std::dec << ". Expected " << sizeof(T) << ", Wrote " << bytes_written << std::endl;
+            LogMessageF("[-] DriverComm::write_memory: Write size mismatch for address 0x%p. Expected %zu, Wrote %zu", (void*)addr, sizeof(T), bytes_written);
             #endif
             return STATUS_PARTIAL_COPY; // Indicate error on partial write
         }
@@ -143,7 +138,7 @@ namespace DriverComm {
         out_address = 0;
         DWORD target_pid_to_use = (pid != 0) ? pid : DriverComm::g_pid;
         if (target_pid_to_use == 0) {
-            std::cerr << "[-] DriverComm::allocate_memory_ex: PID not set and not provided." << std::endl;
+            LogMessage("[-] DriverComm::allocate_memory_ex: PID not set and not provided.");
             return STATUS_INVALID_PARAMETER; // Or STATUS_INVALID_DEVICE_STATE
         }
         // StealthComm::AllocateMemory returns uintptr_t (0 on error), not NTSTATUS directly.
@@ -167,7 +162,7 @@ namespace DriverComm {
         out_base_address = 0;
         DWORD target_pid_to_use = (pid != 0) ? pid : DriverComm::g_pid;
         if (target_pid_to_use == 0) {
-            std::cerr << "[-] DriverComm::get_module_base_info: PID not set and not provided." << std::endl;
+            LogMessage("[-] DriverComm::get_module_base_info: PID not set and not provided.");
             return STATUS_INVALID_PARAMETER;
         }
         // StealthComm::GetModuleBase returns uintptr_t (0 on error)
@@ -191,7 +186,7 @@ namespace DriverComm {
         out_found_address = 0;
         DWORD target_pid_to_use_final = (pid_to_use != 0) ? pid_to_use : DriverComm::g_pid;
         if (target_pid_to_use_final == 0) {
-            std::cerr << "[-] DriverComm::aob_scan_info: PID not set." << std::endl;
+            LogMessage("[-] DriverComm::aob_scan_info: PID not set.");
             return STATUS_INVALID_PARAMETER;
         }
         // StealthComm::AobScan returns uintptr_t (0 on error/not found)
@@ -249,25 +244,89 @@ namespace DriverComm {
     NTSTATUS free_memory_ex(DWORD pid, uintptr_t address, SIZE_T size) {
         DWORD target_pid_to_use = (pid != 0) ? pid : DriverComm::g_pid;
         if (target_pid_to_use == 0) {
-            std::cerr << "[-] DriverComm::free_memory_ex: PID not set." << std::endl;
+            LogMessage("[-] DriverComm::free_memory_ex: PID not set.");
             return STATUS_INVALID_PARAMETER;
         }
         if (address == 0) {
-            std::cerr << "[-] DriverComm::free_memory_ex: Address cannot be zero." << std::endl;
+            LogMessage("[-] DriverComm::free_memory_ex: Address cannot be zero.");
             return STATUS_INVALID_PARAMETER_2;
         }
         // StealthComm::FreeMemory now returns NTSTATUS
         NTSTATUS status = StealthComm::FreeMemory(static_cast<uint64_t>(target_pid_to_use), address, size);
-        if (!NT_SUCCESS(status)) {
-            #ifdef _DEBUG
-            std::cerr << "[-] DriverComm::free_memory_ex: StealthComm::FreeMemory failed for address 0x" << std::hex << address << " with status 0x" << status << std::dec << std::endl;
-            #endif
-        }
+        // StealthComm::FreeMemory already logs its failures.
+        // We could add a DriverComm specific log here if StealthComm's isn't sufficient or if we want to log success too.
+        // For example:
+        // if (!NT_SUCCESS(status)) {
+        //     LogMessageF("[-] DriverComm::free_memory_ex: StealthComm::FreeMemory failed for address 0x%p with status 0x%lX", (void*)address, status);
+        // } else {
+        //     LogMessageF("[+] DriverComm::free_memory_ex: StealthComm::FreeMemory succeeded for address 0x%p", (void*)address);
+        // }
         return status;
     }
     // Old compatible function
     bool free_memory(uintptr_t address, SIZE_T size) {
         return NT_SUCCESS(free_memory_ex(DriverComm::g_pid, address, size));
+    }
+
+    // Define IOCTL for requesting driver unload
+    // This must match the KM definition: CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_NEITHER, FILE_ANY_ACCESS)
+    // FILE_DEVICE_UNKNOWN = 0x22, METHOD_NEITHER = 3, FILE_ANY_ACCESS = 0
+    // Value = (0x22 << 16) | (0 << 14) | (0x902 << 2) | 3 = 0x00220000 | 0x00000000 | 0x00002408 | 0x00000003 = 0x22240B
+    #define UM_IOCTL_REQUEST_UNLOAD_DRIVER 0x22240B
+
+    NTSTATUS RequestDriverUnload() {
+        LogMessage("[+] DriverComm: Attempting to request driver unload.");
+        HANDLE hDevice = CreateFileW(
+            StealthComm::HANDSHAKE_DEVICE_SYMLINK_NAME_UM, // Defined in StealthComm.h
+            GENERIC_WRITE, // May not strictly need write for METHOD_NEITHER, but GENERIC_READ|GENERIC_WRITE is common. GENERIC_WRITE for safety.
+            0,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr
+        );
+
+        if (hDevice == INVALID_HANDLE_VALUE) {
+            DWORD error = GetLastError();
+            LogMessageF("[-] DriverComm: Failed to open handle to KM handshake device. Error: %lu", error);
+            // Convert Win32 error to NTSTATUS
+            if (error == ERROR_ACCESS_DENIED) return STATUS_ACCESS_DENIED; // 0xC0000022
+            if (error == ERROR_FILE_NOT_FOUND) return STATUS_OBJECT_NAME_NOT_FOUND; // 0xC0000034
+            return STATUS_UNSUCCESSFUL; // 0xC0000001
+        }
+
+        LogMessage("[+] DriverComm: Device handle obtained for unload IOCTL.");
+        DWORD bytesReturned = 0;
+        NTSTATUS status = STATUS_UNSUCCESSFUL;
+
+        BOOL bResult = DeviceIoControl(
+            hDevice,
+            UM_IOCTL_REQUEST_UNLOAD_DRIVER,
+            nullptr,
+            0,
+            nullptr,
+            0,
+            &bytesReturned,
+            nullptr
+        );
+
+        if (bResult) {
+            LogMessage("[+] DriverComm: IOCTL_REQUEST_UNLOAD_DRIVER sent successfully to KM.");
+            status = STATUS_SUCCESS;
+        } else {
+            DWORD error = GetLastError();
+            LogMessageF("[-] DriverComm: DeviceIoControl for IOCTL_REQUEST_UNLOAD_DRIVER failed. Error: %lu", error);
+            // Try to map common errors, otherwise return generic failure.
+            // Note: The actual NTSTATUS of the IRP completion in kernel isn't directly returned by DeviceIoControl's boolean.
+            // This status primarily reflects the DeviceIoControl call itself.
+            if (error == ERROR_ACCESS_DENIED) status = STATUS_ACCESS_DENIED;
+            else if (error == ERROR_INVALID_HANDLE) status = STATUS_INVALID_HANDLE;
+            // Add more mappings if specific errors are expected.
+            else status = STATUS_UNSUCCESSFUL;
+        }
+
+        CloseHandle(hDevice);
+        return status;
     }
 
 } // namespace DriverComm

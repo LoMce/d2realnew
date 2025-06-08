@@ -1,7 +1,9 @@
 #include <Windows.h>
-#include <iostream>
+// #include <iostream> // Replaced by Logging.h
 #include <string>
 #include <vector>
+#include <sstream> // For std::wstringstream if used, or for general string manipulation
+#include "../ImGui Standalone/Logging.h" // Added Logging.h
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -29,6 +31,15 @@ MAKE SURE YOU DISABLE THE CONSOLE IN IUIC_ImGui\main.cpp WHEN PUSHING RELEASE BU
 // 1.0.6 - fixed external overlay, added new feature, cleaned up menu
 #define LOADER_VERSION "1.0.6"
 
+// Helper to convert wstring to string for logging (if not already in a common header)
+static std::string WStringToStringLoader(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
 namespace Loader {
     
     class LoaderManager {
@@ -37,15 +48,15 @@ namespace Loader {
         ~LoaderManager() = default;
 
         bool Initialize() {
-            std::wcout << L"[+] Hated Loader Initializing..." << std::endl;
+            LogMessage("[+] Hated Loader Initializing...");
             
             // Initialize KeyAuth
             try {
                 KeyAuthManager::Initialize();
-                std::wcout << L"[+] KeyAuth initialized successfully" << std::endl;
+                LogMessage("[+] KeyAuth initialized successfully");
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] KeyAuth initialization failed: " << e.what() << std::endl;
+                LogMessageF("[-] KeyAuth initialization failed: %s", e.what());
                 return false;
             }
             
@@ -59,19 +70,19 @@ namespace Loader {
 
             // Step 2: Authenticate user
             if (!AuthenticateUser()) {
-                std::wcerr << L"[-] Authentication failed" << std::endl;
+                LogMessage("[-] Authentication failed");
                 return false;
             }
 
             // Step 3: Map the driver
             if (!MapDriver()) {
-                std::wcerr << L"[-] Driver mapping failed" << std::endl;
+                LogMessage("[-] Driver mapping failed");
                 return false;
             }
 
             // Step 4: Extract and launch the main executable
             if (!LaunchMainExecutable()) {
-                std::wcerr << L"[-] Failed to launch main executable" << std::endl;
+                LogMessage("[-] Failed to launch main executable");
                 return false;
             }
 
@@ -84,7 +95,7 @@ namespace Loader {
         }
 
     private:        bool AuthenticateUser() {
-            std::wcout << L"[+] Starting authentication process..." << std::endl;
+            LogMessage("[+] Starting authentication process...");
             
             // Try to load saved credentials first
             if (!KeyAuthManager::gTriedAuto) {
@@ -92,7 +103,7 @@ namespace Loader {
                 char tempLicense[128];
                 
                 if (KeyAuthManager::LoadCredentials(tempLicense, sizeof(tempLicense))) {
-                    std::wcout << L"[+] Found saved credentials, attempting auto-login..." << std::endl;
+                    LogMessage("[+] Found saved credentials, attempting auto-login...");
                     
                     // Copy to main license buffer
                     strcpy_s(KeyAuthManager::License, 128, tempLicense);
@@ -110,16 +121,16 @@ namespace Loader {
                         // Check HWID match
                         if (strcmp(KeyAuthManager::savedHwid, KeyAuthManager::KeyAuthApp.user_data.hwid.c_str()) == 0) {
                             KeyAuthManager::isAuthenticated = true;
-                            std::wcout << L"[+] Auto-login successful!" << std::endl;
-                            std::wcout << L"[+] Welcome back, " << KeyAuthManager::KeyAuthApp.user_data.username.c_str() << std::endl;
-                            std::wcout << L"[+] Time remaining: " << KeyAuthManager::GetTimeRemaining().c_str() << std::endl;
+                            LogMessage("[+] Auto-login successful!");
+                            LogMessageF("[+] Welcome back, %s", KeyAuthManager::KeyAuthApp.user_data.username.c_str());
+                            LogMessageF("[+] Time remaining: %s", KeyAuthManager::GetTimeRemaining().c_str());
                             return true;
                         } else {
-                            std::wcout << L"[-] HWID mismatch - license locked to another machine" << std::endl;
+                            LogMessage("[-] HWID mismatch - license locked to another machine");
                             KeyAuthManager::ClearCredentials();
                         }
                     } else {
-                        std::wcout << L"[-] Saved license invalid" << std::endl;
+                        LogMessage("[-] Saved license invalid");
                         KeyAuthManager::ClearCredentials();
                     }
                 }
@@ -127,7 +138,7 @@ namespace Loader {
             
             // Check if already authenticated
             if (KeyAuthManager::IsAuthenticated()) {
-                std::wcout << L"[+] User already authenticated" << std::endl;
+                LogMessage("[+] User already authenticated");
                 return true;
             }
 
@@ -140,6 +151,8 @@ namespace Loader {
             int maxAttempts = 3;
             int attempts = 0;
 
+            // Console interaction for login - keep std::cout and std::cin for this part.
+            // Output prompts are fine, they are not debug spam.
             while (attempts < maxAttempts) {
                 std::cout << "\n====== Hated Authentication ======" << std::endl;
                 std::cout << "Enter your license key: ";
@@ -191,31 +204,31 @@ namespace Loader {
         }
 
         bool MapDriver() {
-            std::wcout << L"[+] Starting driver mapping process..." << std::endl;
+            LogMessage("[+] Starting driver mapping process...");
             
             try {
-                if (DriverMapper::MapDriver()) {
-                    std::wcout << L"[+] Driver mapped successfully!" << std::endl;
+                if (DriverMapper::MapDriver()) { // DriverMapper::MapDriver logs internally now
+                    LogMessage("[+] Driver mapped successfully!");
                     return true;
                 } else {
-                    std::wcerr << L"[-] Driver mapping failed!" << std::endl;
+                    LogMessage("[-] Driver mapping failed!"); // MapDriver already logs specifics
                     return false;
                 }
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] Driver mapping exception: " << e.what() << std::endl;
+                LogMessageF("[-] Driver mapping exception: %s", e.what());
                 return false;
             }
         }
 
         bool LaunchMainExecutable() {
-            std::wcout << L"[+] Extracting and launching main executable..." << std::endl;
+            LogMessage("[+] Extracting and launching main executable...");
             
             try {
                 // Create temp directory
                 std::wstring tempDir = GetTempDirectory();
                 if (tempDir.empty()) {
-                    std::wcerr << L"[-] Failed to get temp directory" << std::endl;
+                    LogMessage("[-] Failed to get temp directory");
                     return false;
                 }
 
@@ -225,33 +238,33 @@ namespace Loader {
 
                 // Extract embedded executable
                 if (!ExtractExecutable(exePath)) {
-                    std::wcerr << L"[-] Failed to extract executable" << std::endl;
+                    LogMessage("[-] Failed to extract executable"); // ExtractExecutable logs specifics
                     return false;
                 }
 
                 // Launch the executable
                 if (!LaunchExecutable(exePath)) {
-                    std::wcerr << L"[-] Failed to launch executable" << std::endl;
+                    LogMessage("[-] Failed to launch executable"); // LaunchExecutable logs specifics
                     DeleteFileW(exePath.c_str()); // Clean up on failure
                     return false;
                 }
 
-                std::wcout << L"[+] Main executable launched successfully!" << std::endl;
+                LogMessage("[+] Main executable launched successfully!");
                 
                 // Optionally wait a bit before cleaning up
                 std::this_thread::sleep_for(std::chrono::seconds(2));
                 
                 // Clean up the extracted file
                 if (DeleteFileW(exePath.c_str())) {
-                    std::wcout << L"[+] Temporary executable cleaned up" << std::endl;
+                    LogMessage("[+] Temporary executable cleaned up");
                 } else {
-                    std::wcout << L"[!] Warning: Failed to clean up temporary executable" << std::endl;
+                    LogMessage("[!] Warning: Failed to clean up temporary executable");
                 }
 
                 return true;
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] Exception launching executable: " << e.what() << std::endl;
+                LogMessageF("[-] Exception launching executable: %s", e.what());
                 return false;
             }
         }
@@ -271,7 +284,7 @@ namespace Loader {
             try {
                 std::ofstream file(filePath, std::ios::binary);
                 if (!file.is_open()) {
-                    std::wcerr << L"[-] Failed to create executable file: " << filePath << std::endl;
+                    LogMessageF("[-] Failed to create executable file: %s", WStringToStringLoader(filePath).c_str());
                     return false;
                 }
                 
@@ -279,15 +292,15 @@ namespace Loader {
                 file.close();
                 
                 if (!FileExists(filePath)) {
-                    std::wcerr << L"[-] Executable extraction verification failed: " << filePath << std::endl;
+                    LogMessageF("[-] Executable extraction verification failed: %s", WStringToStringLoader(filePath).c_str());
                     return false;
                 }
                 
-                std::wcout << L"[+] Extracted executable: " << filePath << L" (" << IUIC_ImGui_exe_len << L" bytes)" << std::endl;
+                LogMessageF("[+] Extracted executable: %s (%u bytes)", WStringToStringLoader(filePath).c_str(), IUIC_ImGui_exe_len);
                 return true;
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] Exception extracting executable: " << e.what() << std::endl;
+                LogMessageF("[-] Exception extracting executable: %s", e.what());
                 return false;
             }
         }
@@ -299,7 +312,7 @@ namespace Loader {
             si.dwFlags = STARTF_USESHOWWINDOW;
             si.wShowWindow = SW_SHOW; // Show the main application window
             
-            std::wcout << L"[+] Launching: " << exePath << std::endl;
+            LogMessageF("[+] Launching: %s", WStringToStringLoader(exePath).c_str());
             
             BOOL result = CreateProcessW(
                 exePath.c_str(),     // Application path
@@ -316,11 +329,11 @@ namespace Loader {
             
             if (!result) {
                 DWORD error = GetLastError();
-                std::wcerr << L"[-] CreateProcess failed with error: " << error << std::endl;
+                LogMessageF("[-] CreateProcess failed with error: %lu", error);
                 return false;
             }
             
-            std::wcout << L"[+] Main executable launched successfully (PID: " << pi.dwProcessId << L")" << std::endl;
+            LogMessageF("[+] Main executable launched successfully (PID: %lu)", pi.dwProcessId);
             
             // Close handles - we don't need to wait for the process
             CloseHandle(pi.hProcess);
@@ -340,11 +353,12 @@ namespace Loader {
                 UpdateManager::Release latestRelease;
                 
                 if (UpdateManager::CheckForUpdates(LOADER_VERSION, latestRelease)) {
-                    std::wcout << L"\n[!] Update Available!" << std::endl;
-                    std::wcout << L"[!] Current Version: " << LOADER_VERSION << std::endl;
-                    std::wcout << L"[!] Latest Version: " << latestRelease.tagName.c_str() << std::endl;
-                    std::wcout << L"[!] Release Notes: " << latestRelease.name.c_str() << std::endl;
+                    LogMessage("\n[!] Update Available!"); // Using LogMessage for simple strings
+                    LogMessageF("[!] Current Version: %s", LOADER_VERSION);
+                    LogMessageF("[!] Latest Version: %s", latestRelease.tagName.c_str());
+                    LogMessageF("[!] Release Notes: %s", latestRelease.name.c_str());
                     
+                    // Console interaction for update confirmation - keep std::cout and std::cin
                     std::cout << "\nWould you like to update now? (y/n): ";
                     std::string response;
                     std::getline(std::cin, response);
@@ -352,27 +366,27 @@ namespace Loader {
                     if (response == "y" || response == "Y" || response == "yes" || response == "Yes") {
                         return PerformUpdate(latestRelease);
                     } else {
-                        std::wcout << L"[+] Update skipped. Continuing with current version..." << std::endl;
+                        LogMessage("[+] Update skipped. Continuing with current version...");
                     }
                 }
                 
                 return true; // Continue with normal operation
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] Error checking for updates: " << e.what() << std::endl;
-                std::wcout << L"[+] Continuing without update check..." << std::endl;
+                LogMessageF("[-] Error checking for updates: %s", e.what());
+                LogMessage("[+] Continuing without update check...");
                 return true; // Continue even if update check fails
             }
         }
 
         bool PerformUpdate(const UpdateManager::Release& release) {
             try {
-                std::wcout << L"[+] Starting update process..." << std::endl;
+                LogMessage("[+] Starting update process...");
                 
                 // Get temp directory and create paths
                 std::wstring tempDir = GetTempDirectory();
                 if (tempDir.empty()) {
-                    std::wcerr << L"[-] Failed to get temp directory" << std::endl;
+                    LogMessage("[-] Failed to get temp directory");
                     return false;
                 }
                 
@@ -387,34 +401,34 @@ namespace Loader {
                 
                 // Download the update
                 if (!UpdateManager::DownloadUpdate(release, newLoaderPath)) {
-                    std::wcerr << L"[-] Failed to download update" << std::endl;
+                    LogMessage("[-] Failed to download update");
                     return false;
                 }
                 
                 // Create update helper script
                 if (!UpdateManager::CreateUpdateHelper(helperPath, newLoaderPath, currentLoaderPath)) {
-                    std::wcerr << L"[-] Failed to create update helper" << std::endl;
+                    LogMessage("[-] Failed to create update helper");
                     DeleteFileW(newLoaderPath.c_str());
                     return false;
                 }
                 
-                std::wcout << L"[+] Update downloaded successfully!" << std::endl;
-                std::wcout << L"[+] Launching update helper..." << std::endl;
-                std::wcout << L"[+] The loader will restart automatically after update." << std::endl;
+                LogMessage("[+] Update downloaded successfully!");
+                LogMessage("[+] Launching update helper...");
+                LogMessage("[+] The loader will restart automatically after update.");
                 
                 // Launch update helper
                 if (UpdateManager::LaunchUpdateHelper(helperPath)) {
-                    std::wcout << L"[+] Update process started. Exiting current loader..." << std::endl;
+                    LogMessage("[+] Update process started. Exiting current loader...");
                     return false; // Signal to exit the current loader
                 } else {
-                    std::wcerr << L"[-] Failed to launch update helper" << std::endl;
+                    LogMessage("[-] Failed to launch update helper");
                     DeleteFileW(newLoaderPath.c_str());
                     DeleteFileW(helperPath.c_str());
                     return false;
                 }
             }
             catch (const std::exception& e) {
-                std::wcerr << L"[-] Error during update process: " << e.what() << std::endl;
+                LogMessageF("[-] Error during update process: %s", e.what());
                 return false;
             }
         }
@@ -429,19 +443,25 @@ int main() {
     SetConsoleTitleW(L"Hated Loader");
     
     // Enable UTF-8 console output
-    SetConsoleOutputCP(CP_UTF8);
-    
-    std::wcout << L"=====================================" << std::endl;
-    std::wcout << L"       Hated Loader v1.0" << std::endl;
-    std::wcout << L"=====================================" << std::endl;
-    std::wcout << std::endl;
+    SetConsoleOutputCP(CP_UTF8); // This is good for std::cout if it were used with UTF-8 strings.
+                                 // Logging.h should handle its output encoding.
+
+    // These initial messages are fine with std::wcout as they are part of the console UI before Logging might be fully active
+    // or if we want them regardless of Logging's _DEBUG state.
+    // However, to be consistent with the goal of centralizing, they will be converted.
+    // For this subtask, I will convert them.
+    LogMessage("=====================================");
+    LogMessage("       Hated Loader v1.0"); // LOADER_VERSION could be used here too.
+    LogMessage("=====================================");
+    LogMessage(""); // For newline
 
     Loader::LoaderManager loader;
     
     try {
         // Initialize loader components
         if (!loader.Initialize()) {
-            std::wcerr << L"[-] Loader initialization failed" << std::endl;
+            LogMessage("[-] Loader initialization failed");
+            // Keep console interaction for critical exit
             std::wcout << L"\nPress any key to exit..." << std::endl;
             std::cin.get();
             return 1;
@@ -449,17 +469,17 @@ int main() {
 
         // Run the main loader process
         if (loader.Run()) {
-            std::wcout << L"[+] Loader completed successfully!" << std::endl;
-            std::wcout << L"[+] Main application should now be running." << std::endl;
+            LogMessage("[+] Loader completed successfully!");
+            LogMessage("[+] Main application should now be running.");
         } else {
-            std::wcerr << L"[-] Loader process failed" << std::endl;
+            LogMessage("[-] Loader process failed");
             std::wcout << L"\nPress any key to exit..." << std::endl;
             std::cin.get();
             return 1;
         }
     }
     catch (const std::exception& e) {
-        std::wcerr << L"[-] Loader exception: " << e.what() << std::endl;
+        LogMessageF("[-] Loader exception: %s", e.what());
         std::wcout << L"\nPress any key to exit..." << std::endl;
         std::cin.get();
         return 1;
@@ -468,7 +488,7 @@ int main() {
     // Cleanup
     loader.Cleanup();
     
-    std::wcout << L"\nLoader will exit in 3 seconds..." << std::endl;
+    LogMessage("\nLoader will exit in 3 seconds...");
     std::this_thread::sleep_for(std::chrono::seconds(3));
     
     return 0;
