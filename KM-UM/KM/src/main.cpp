@@ -1,6 +1,7 @@
 #include "includes.h"
 #include <bcrypt.h> // For BCryptGenRandom
 #include <wdmsec.h> // For IoCreateDeviceSecure and SDDL constants
+#include <ntstrsafe.h> // For swprintf_s, RtlStringCbPrintfW etc.
 
 typedef enum _SYSTEM_INFORMATION_CLASS {
     SystemBasicInformation = 0,
@@ -118,10 +119,18 @@ BOOLEAN     g_discovery_thread_should_run = FALSE;
 
 // --- START: Globals and Definitions for UM->KM Handshake ---
 PDEVICE_OBJECT g_pHandshakeDeviceObject = NULL;
-UNICODE_STRING g_handshake_device_name_us;
-UNICODE_STRING g_handshake_symlink_name_us;
-WCHAR g_handshake_device_name_buffer[128] = L"\\Device\\CoreSysCom_{E7A1B02C-0D9F-45C1-9D8E-F6B5C4A3210F}";
-WCHAR g_handshake_symlink_name_buffer[128] = L"\\DosDevices\\CoreSysComLink_{E7A1B02C-0D9F-45C1-9D8E-F6B5C4A3210F}";
+
+// Dynamically generated names and IOCTL
+ULONG g_dynamic_handshake_ioctl_code = 0;
+WCHAR g_dynamic_device_name_buffer[128];
+WCHAR g_dynamic_symlink_name_buffer[128];
+UNICODE_STRING g_dynamic_device_name_us;
+UNICODE_STRING g_dynamic_symlink_name_us;
+
+// Static buffers for fixed part of names - to be used with dynamic GUID
+const WCHAR DEVICE_NAME_PREFIX[] = L"\\Device\\CoreSysCom_";
+const WCHAR SYMLINK_NAME_PREFIX[] = L"\\DosDevices\\CoreSysComLink_";
+
 
 PVOID volatile g_obfuscated_ptr1_um_addr_via_handshake = NULL;
 KEVENT g_handshake_completed_event;
@@ -136,18 +145,33 @@ const ULONG MAX_POLLING_DELAY_MS = 100;
 const ULONG POLLING_JITTER_MS = 2;
 // --- END: Globals for Polling Work Item ---
 
-#define IOCTL_STEALTH_HANDSHAKE CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_WRITE_ACCESS)
-#define BEACON_PATTERN_SIZE_KM 16
+// IOCTL_STEALTH_HANDSHAKE is now g_dynamic_handshake_ioctl_code
+// BEACON_PATTERN_SIZE_KM is now defined in includes.h
+// STEALTH_HANDSHAKE_DATA_KM is now defined in includes.h
 
-typedef struct _STEALTH_HANDSHAKE_DATA {
-    PVOID ObfuscatedPtrStruct1HeadUmAddress;
-    UINT64 VerificationToken;
-    UINT8 BeaconPattern[BEACON_PATTERN_SIZE_KM];
-} STEALTH_HANDSHAKE_DATA, *PSTEALTH_HANDSHAKE_DATA;
-
-UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM];
-UINT64 g_received_um_verification_token = 0;
+// These globals are defined in includes.h as extern and here as actual definitions.
+// UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM]; // Definition will be kept
+// UINT64 g_received_um_verification_token = 0; // Definition will be kept
+// UINT64 g_received_beacon_salt_km = 0; // Definition was added in previous change
+UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM]; // Ensure this is defined once. It's used by HandshakeDeviceControl.
+UINT64 g_received_um_verification_token = 0; // Used by HandshakeDeviceControl.
+// g_received_beacon_salt_km is defined in the previous change.
 // const UINT64 SOME_PREDEFINED_CONSTANT_FOR_TOKEN_KM = 0xCAFEFEEDDEAFBEEFULL; // Removed, shared secret will be g_km_dynamic_obfuscation_xor_key
+
+// Define global for received beacon salt (KM side)
+UINT64 g_received_beacon_salt_km = 0;
+// g_received_beacon_pattern_km is already defined.
+
+// Globals for dynamic driver name (defined in includes.h as extern)
+UNICODE_STRING g_dynamic_driver_name_us; // Initialized in DriverEntry
+WCHAR g_dynamic_driver_name_buffer[128]; // Buffer for the dynamic driver name
+
+// Globals for dynamic pool tags (defined in includes.h as extern)
+ULONG g_pool_tag_devn = 'DevN'; // Default, will be XORed in DriverEntry
+ULONG g_pool_tag_syml = 'SymL'; // Default, will be XORed in DriverEntry
+ULONG g_pool_tag_wkit = 'WkIt'; // Default, will be XORed in DriverEntry
+ULONG g_pool_tag_nmbf = 'NmBf'; // Default, will be XORed in DriverEntry
+const WCHAR DRIVER_NAME_PREFIX_STATIC[] = L"\\Driver\\CoreDrv"; // Used for dynamic driver name construction
 
 VOID DiscoveryAndAttachmentThread(PVOID StartContext); // Forward declaration
 
@@ -195,7 +219,7 @@ static VOID PrepareForUnload() {
         // The g_km_thread_should_run = FALSE check within the callback is the primary stop mechanism.
         // We can free the allocation here as it won't be requeued.
         debug_print("[+] PrepareForUnload: Polling work item signaled to stop and memory freed.\n");
-        ExFreePoolWithTag(localWorkItem, 'WkIt'); // Ensure 'WkIt' matches allocation tag
+        ExFreePoolWithTag(localWorkItem, g_pool_tag_wkit);
     }
 
     // Clear shared UM pointers and dereference target process
@@ -210,6 +234,7 @@ static VOID PrepareForUnload() {
     g_obfuscated_ptr1_um_addr_via_handshake = NULL;
     RtlZeroMemory(g_received_beacon_pattern_km, sizeof(g_received_beacon_pattern_km));
     g_received_um_verification_token = 0;
+    g_received_beacon_salt_km = 0; // Also clear salt on this error path
 
     KeReleaseSpinLock(&g_comm_lock, oldIrql);
 
@@ -254,11 +279,13 @@ struct PtrStruct1_KM {
 };
 #pragma pack(pop)
 
+// Structure to hold dynamic signatures and keys, as read from UM.
+// Beacon is now the first member to match UM's definition and simplify AOB scanning.
 struct DynamicSignaturesRelay {
+    UINT8 beacon[BEACON_PATTERN_SIZE_KM]; // Must be first for AOB scan logic
     UINT64 dynamic_head_signature;
     UINT64 dynamic_shared_comm_block_signature;
     UINT64 dynamic_obfuscation_xor_key;
-    UINT8 beacon[BEACON_PATTERN_SIZE_KM];
 };
 
 UINT64 g_km_dynamic_head_signature = 0;
@@ -347,10 +374,23 @@ NTSTATUS FetchDynamicSignaturesFromProcess(PEPROCESS target_eprocess) {
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     SIZE_T bytes_read = 0;
 
+    // Create a salted version of the beacon for AOB scan
+    UINT8 salted_beacon_pattern[BEACON_PATTERN_SIZE_KM];
+    RtlCopyMemory(salted_beacon_pattern, g_received_beacon_pattern_km, BEACON_PATTERN_SIZE_KM);
+
+    // XOR the first 8 bytes of the beacon with the salt
+    // Ensure BEACON_PATTERN_SIZE_KM is large enough if XORing fixed 8 bytes.
+    // Here, we'll XOR min(8, BEACON_PATTERN_SIZE_KM) bytes.
+    UINT32 salt_xor_len = min(sizeof(g_received_beacon_salt_km), BEACON_PATTERN_SIZE_KM);
+    for (UINT32 i = 0; i < salt_xor_len; ++i) {
+        salted_beacon_pattern[i] ^= ((UINT8*)&g_received_beacon_salt_km)[i];
+    }
+    // If salt is 0 (e.g. handshake not completed fully, or UM sent 0), salted_beacon_pattern will be same as original.
+
     CHAR beacon_aob_pattern_str[BEACON_PATTERN_SIZE_KM * 3 + 1];
     RtlZeroMemory(beacon_aob_pattern_str, sizeof(beacon_aob_pattern_str));
     for (int i = 0; i < BEACON_PATTERN_SIZE_KM; ++i) {
-        BYTE byte_val = g_received_beacon_pattern_km[i];
+        BYTE byte_val = salted_beacon_pattern[i]; // Use the salted beacon for AOB string
         CHAR nibble_high = (byte_val >> 4) & 0x0F;
         CHAR nibble_low = byte_val & 0x0F;
         beacon_aob_pattern_str[i * 3 + 0] = (nibble_high < 10) ? (nibble_high + '0') : (nibble_high - 10 + 'A');
@@ -359,7 +399,14 @@ NTSTATUS FetchDynamicSignaturesFromProcess(PEPROCESS target_eprocess) {
             beacon_aob_pattern_str[i * 3 + 2] = ' ';
         }
     }
-    debug_print("[+] FetchDynamicSignaturesFromProcess: Scanning for beacon pattern: \"%s\"\n", beacon_aob_pattern_str);
+    debug_print("[+] FetchDynamicSignaturesFromProcess: Scanning for SALTED beacon pattern: \"%s\"\n", beacon_aob_pattern_str);
+    // For debugging, print original and salt
+    char original_beacon_hex_str[BEACON_PATTERN_SIZE_KM * 3 + 1];
+     for (int i = 0; i < BEACON_PATTERN_SIZE_KM; ++i) {
+        sprintf_s(original_beacon_hex_str + (i * 3), 4, "%02X ", g_received_beacon_pattern_km[i]);
+    }
+    debug_print("[+] FetchDynamicSignaturesFromProcess: Original Beacon: %s, Salt: 0x%llX\n", original_beacon_hex_str, g_received_beacon_salt_km);
+
 
     UINT64 found_beacon_umva = 0;
     SIZE_T results_count = 0;
@@ -391,11 +438,19 @@ NTSTATUS FetchDynamicSignaturesFromProcess(PEPROCESS target_eprocess) {
         return STATUS_DATA_ERROR;
     }
 
+    // De-obfuscate the relay data members using the received BeaconSalt
+    // The beacon itself was not obfuscated with this salt in UM, so it's already verified.
+    km_relay_data_copy.dynamic_head_signature ^= g_received_beacon_salt_km;
+    km_relay_data_copy.dynamic_shared_comm_block_signature ^= g_received_beacon_salt_km;
+    km_relay_data_copy.dynamic_obfuscation_xor_key ^= g_received_beacon_salt_km;
+
+    debug_print("[+] FetchDynamicSignaturesFromProcess: De-obfuscated DynamicSignaturesRelay members with BeaconSalt 0x%llX.\n", g_received_beacon_salt_km);
+
     g_km_dynamic_head_signature = km_relay_data_copy.dynamic_head_signature;
     g_km_dynamic_shared_comm_block_signature = km_relay_data_copy.dynamic_shared_comm_block_signature;
     g_km_dynamic_obfuscation_xor_key = km_relay_data_copy.dynamic_obfuscation_xor_key;
 
-    debug_print("[+] FetchDynamicSignaturesFromProcess: Dynamic signatures fetched and verified via beacon:\n");
+    debug_print("[+] FetchDynamicSignaturesFromProcess: Dynamic signatures fetched, de-obfuscated, and verified via beacon:\n");
     debug_print("    Head Signature: 0x%llX\n", g_km_dynamic_head_signature);
     debug_print("    Shared Block Signature: 0x%llX\n", g_km_dynamic_shared_comm_block_signature);
     debug_print("    XOR Key: 0x%llX\n", g_km_dynamic_obfuscation_xor_key);
@@ -582,7 +637,7 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     g_km_thread_should_run = TRUE;
 
     if (g_pPollingWorkItem == NULL) {
-        g_pPollingWorkItem = (PWORK_QUEUE_ITEM)ExAllocatePoolWithTag(NonPagedPool, sizeof(WORK_QUEUE_ITEM), 'WkIt');
+        g_pPollingWorkItem = (PWORK_QUEUE_ITEM)ExAllocatePoolWithTag(NonPagedPool, sizeof(WORK_QUEUE_ITEM), g_pool_tag_wkit);
     }
 
     if (g_pPollingWorkItem) {
@@ -607,11 +662,11 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     NTSTATUS status = STATUS_SUCCESS;
     ULONG_PTR information = 0;
     PEPROCESS callingProcess = IoGetCurrentProcess(); // Get the calling process
+    ULONG io_control_code = io_stack_location->Parameters.DeviceIoControl.IoControlCode;
 
-    switch (io_stack_location->Parameters.DeviceIoControl.IoControlCode) {
-        case IOCTL_STEALTH_HANDSHAKE: {
-            // Check if the driver is already in an active session with a UM process
-            KIRQL oldIrqlCheck;
+    if (io_control_code == g_dynamic_handshake_ioctl_code) {
+        // Check if the driver is already in an active session with a UM process
+        KIRQL oldIrqlCheck;
             KeAcquireSpinLock(&g_comm_lock, &oldIrqlCheck);
             BOOLEAN already_active = (g_target_process != NULL || g_um_shared_comm_block_ptr != NULL);
             KeReleaseSpinLock(&g_comm_lock, oldIrqlCheck);
@@ -626,7 +681,8 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             ULONG input_buffer_length = io_stack_location->Parameters.DeviceIoControl.InputBufferLength;
             PVOID input_buffer = Irp->AssociatedIrp.SystemBuffer;
 
-            if (input_buffer_length < sizeof(STEALTH_HANDSHAKE_DATA)) {
+            // Use STEALTH_HANDSHAKE_DATA_KM from includes.h
+            if (input_buffer_length < sizeof(STEALTH_HANDSHAKE_DATA_KM)) {
                 status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
@@ -646,13 +702,14 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
             // Proceed only if ProbeForRead was successful (status is still STATUS_SUCCESS from the __try block perspective)
             if (NT_SUCCESS(status)) { // This 'status' reflects ProbeForRead success/failure
-                PSTEALTH_HANDSHAKE_DATA pHandshakeData = (PSTEALTH_HANDSHAKE_DATA)input_buffer; // Use validated buffer
+                PSTEALTH_HANDSHAKE_DATA_KM pHandshakeData = (PSTEALTH_HANDSHAKE_DATA_KM)input_buffer; // Use validated buffer
 
                 // Store the UM-provided pointer and token (obfuscated)
                 // These will be used by the DiscoveryAndAttachmentThread after this IOCTL completes
                 // The actual deobfuscation and verification will happen in that thread.
                 g_obfuscated_ptr1_um_addr_via_handshake = pHandshakeData->ObfuscatedPtrStruct1HeadUmAddress;
                 g_received_um_verification_token = pHandshakeData->VerificationToken; // This is the bootstrap XOR key
+    g_received_beacon_salt_km = pHandshakeData->BeaconSalt; // Store the BeaconSalt
 
                 // Copy the beacon pattern
                 RtlCopyMemory(g_received_beacon_pattern_km, pHandshakeData->BeaconPattern, BEACON_PATTERN_SIZE_KM);
@@ -660,6 +717,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                 debug_print("[+] HandshakeDeviceControl: IOCTL_STEALTH_HANDSHAKE received from PID %lu.\n", (ULONG)(ULONG_PTR)PsGetProcessId(callingProcess));
                 debug_print("    Obfuscated PtrStruct1 UMVA: 0x%p\n", g_obfuscated_ptr1_um_addr_via_handshake);
                 debug_print("    Received UM Verification Token (Bootstrap XOR Key): 0x%llX\n", g_received_um_verification_token);
+    debug_print("    Received BeaconSalt: 0x%llX\n", g_received_beacon_salt_km);
                 // For debugging, print received beacon pattern
                 char beacon_hex_str[BEACON_PATTERN_SIZE_KM * 3 + 1];
                 for (int i = 0; i < BEACON_PATTERN_SIZE_KM; ++i) {
@@ -667,12 +725,13 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                 }
                 debug_print("    Received Beacon Pattern: %s\n", beacon_hex_str);
 
-                if (g_obfuscated_ptr1_um_addr_via_handshake == NULL || g_received_um_verification_token == 0) {
+    if (g_obfuscated_ptr1_um_addr_via_handshake == NULL || g_received_um_verification_token == 0 /* BeaconSalt can be 0, so not checking it here */) {
                      debug_print("[-] HandshakeDeviceControl: Invalid handshake data (NULL ptr or zero token).\n");
                      status = STATUS_INVALID_PARAMETER; // This status will be used for IRP completion
                      g_obfuscated_ptr1_um_addr_via_handshake = NULL; // Clear on failure
                      g_received_um_verification_token = 0;
                      RtlZeroMemory(g_received_beacon_pattern_km, sizeof(g_received_beacon_pattern_km));
+         g_received_beacon_salt_km = 0; // Clear salt on failure
                      // No 'break' here, let it fall through to IRP completion with this error status
                 } else {
                     // Set the target process for the DiscoveryAndAttachmentThread
@@ -690,7 +749,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                     if (NT_SUCCESS(status)) {
                         KeReleaseSpinLock(&g_comm_lock, oldIrql);
                         KeSetEvent(&g_handshake_completed_event, IO_NO_INCREMENT, FALSE);
-                        information = sizeof(STEALTH_HANDSHAKE_DATA);
+                        information = sizeof(STEALTH_HANDSHAKE_DATA_KM); // Use correct size
                     } else {
                         KeReleaseSpinLock(&g_comm_lock, oldIrql);
                         // If an error occurred (e.g. STATUS_DEVICE_BUSY), ensure globals are clean
@@ -698,6 +757,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                          g_obfuscated_ptr1_um_addr_via_handshake = NULL;
                          g_received_um_verification_token = 0;
                          RtlZeroMemory(g_received_beacon_pattern_km, sizeof(g_received_beacon_pattern_km));
+                         g_received_beacon_salt_km = 0; // Also clear salt
                          if (g_target_process == callingProcess) { // If we took a reference under this error path
                              ObDereferenceObject(g_target_process);
                              g_target_process = NULL;
@@ -705,21 +765,18 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                     }
                 }
             } // End of if(NT_SUCCESS(status)) from ProbeForRead
-            break; // Break for IOCTL_STEALTH_HANDSHAKE case
-        }
-        case IOCTL_REQUEST_UNLOAD_DRIVER: {
-            debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER received from PID %lu.\n", (ULONG)(ULONG_PTR)PsGetProcessId(callingProcess));
-            PrepareForUnload();
-            status = STATUS_SUCCESS;
-            Irp->IoStatus.Information = 0;
-            debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER processed successfully.\n");
             break;
         }
-        default:
-            status = STATUS_INVALID_DEVICE_REQUEST;
-            information = 0;
-            debug_print("[-] HandshakeDeviceControl: Unknown IOCTL received: 0x%X\n", io_stack_location->Parameters.DeviceIoControl.IoControlCode);
-            break;
+    } else if (io_control_code == IOCTL_REQUEST_UNLOAD_DRIVER) {
+        debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER received from PID %lu.\n", (ULONG)(ULONG_PTR)PsGetProcessId(callingProcess));
+        PrepareForUnload();
+        status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER processed successfully.\n");
+    } else {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        information = 0;
+        debug_print("[-] HandshakeDeviceControl: Unknown IOCTL received: 0x%X\n", io_control_code);
     }
 
     Irp->IoStatus.Status = status;
@@ -912,8 +969,11 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
                  debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to allocate buffer for module name.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
                  break;
             }
-            RtlZeroMemory(module_name_buffer, km_slot_copy.param_size + sizeof(WCHAR));
+            RtlZeroMemory(module_name_buffer, km_slot_copy.param_size + sizeof(WCHAR)); // Ensure null termination space
             memcpy(module_name_buffer, km_slot_copy.parameters, km_slot_copy.param_size);
+            // Ensure module_name_buffer is null-terminated if not already by param_size
+            module_name_buffer[km_slot_copy.param_size / sizeof(WCHAR)] = L'\0';
+
 
             UNICODE_STRING module_name_us;
             RtlInitUnicodeString(&module_name_us, module_name_buffer);
@@ -935,10 +995,10 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
                 km_slot_copy.result_status_code = STATUS_SUCCESS;
                 debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Module %wZ found at 0x%p.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, &module_name_us, module_base);
             } else {
-                km_slot_copy.result_status_code = STATUS_NOT_FOUND;
+                km_slot_copy.result_status_code = STATUS_NOT_FOUND; // Keep as is, or use specific error if GetModuleBase returns one
                 debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Module %wZ not found.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, &module_name_us);
             }
-            ExFreePoolWithTag(module_name_buffer, 'NmBf');
+            ExFreePoolWithTag(module_name_buffer, g_pool_tag_nmbf); // Use dynamic tag
             break;
         }
         case CommCommand::REQUEST_AOB_SCAN: {
@@ -1563,73 +1623,60 @@ NTSTATUS driver_main(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path
     NTSTATUS status = STATUS_SUCCESS;
     debug_print("[+] Kernel Component: driver_main entered.\n");
 
+    // Note: Dynamic Driver Name and Pool Tags are initialized in DriverEntry now.
+    // Dynamic IOCTL, Device Name, and Symlink Name are also initialized in DriverEntry before this function is called.
+
     UNICODE_STRING sddl_admin_system_all;
     RtlInitUnicodeString(&sddl_admin_system_all, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
 
     KeInitializeEvent(&g_handshake_completed_event, NotificationEvent, FALSE);
 
-    g_handshake_device_name_us.Buffer = (PWCH)ExAllocatePoolWithTag(PagedPool, sizeof(g_handshake_device_name_buffer), 'DevN');
-    if (!g_handshake_device_name_us.Buffer) {
-        debug_print("[-] driver_main: Failed to allocate buffer for handshake device name.\n");
-        status = STATUS_INSUFFICIENT_RESOURCES;
+    // Create device with dynamic name
+    status = IoCreateDeviceSecure(
+        driver_object,
+        0,
+        &g_dynamic_device_name_us, // Use dynamic name
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,
+        &sddl_admin_system_all,
+        NULL,
+        &g_pHandshakeDeviceObject
+    );
+
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] driver_main: Failed to create secure handshake device object with dynamic name. Status: 0x%X\n", status);
+        g_pHandshakeDeviceObject = NULL; // Ensure it's NULL on failure
     } else {
-        RtlCopyMemory(g_handshake_device_name_us.Buffer, g_handshake_device_name_buffer, sizeof(g_handshake_device_name_buffer));
-        g_handshake_device_name_us.Length = sizeof(g_handshake_device_name_buffer) - sizeof(WCHAR);
-        g_handshake_device_name_us.MaximumLength = sizeof(g_handshake_device_name_buffer);
-    }
-
-    if(NT_SUCCESS(status)) {
-        g_handshake_symlink_name_us.Buffer = (PWCH)ExAllocatePoolWithTag(PagedPool, sizeof(g_handshake_symlink_name_buffer), 'SymL');
-        if (!g_handshake_symlink_name_us.Buffer) {
-            debug_print("[-] driver_main: Failed to allocate buffer for handshake symlink name.\n");
-            status = STATUS_INSUFFICIENT_RESOURCES;
-            if (g_handshake_device_name_us.Buffer) ExFreePoolWithTag(g_handshake_device_name_us.Buffer, 'DevN');
-            g_handshake_device_name_us.Buffer = NULL;
-        } else {
-            RtlCopyMemory(g_handshake_symlink_name_us.Buffer, g_handshake_symlink_name_buffer, sizeof(g_handshake_symlink_name_buffer));
-            g_handshake_symlink_name_us.Length = sizeof(g_handshake_symlink_name_buffer) - sizeof(WCHAR);
-            g_handshake_symlink_name_us.MaximumLength = sizeof(g_handshake_symlink_name_buffer);
-        }
-    }
-
-    if (NT_SUCCESS(status)) {
-        status = IoCreateDeviceSecure(
-            driver_object,
-            0,
-            &g_handshake_device_name_us,
-            FILE_DEVICE_UNKNOWN,
-            FILE_DEVICE_SECURE_OPEN,
-            FALSE,
-            &sddl_admin_system_all,
-            NULL,
-            &g_pHandshakeDeviceObject
-        );
-
+        debug_print("[+] driver_main: Handshake device object created successfully with dynamic name.\n");
+        status = IoCreateSymbolicLink(&g_dynamic_symlink_name_us, &g_dynamic_device_name_us); // Use dynamic names
         if (!NT_SUCCESS(status)) {
-            debug_print("[-] driver_main: Failed to create secure handshake device object. Status: 0x%X\n", status);
-            if (g_handshake_device_name_us.Buffer) ExFreePoolWithTag(g_handshake_device_name_us.Buffer, 'DevN');
-            if (g_handshake_symlink_name_us.Buffer) ExFreePoolWithTag(g_handshake_symlink_name_us.Buffer, 'SymL');
-            g_handshake_device_name_us.Buffer = NULL;
-            g_handshake_symlink_name_us.Buffer = NULL;
+            debug_print("[-] driver_main: Failed to create symbolic link for handshake device with dynamic name. Status: 0x%X\n", status);
+            IoDeleteDevice(g_pHandshakeDeviceObject);
             g_pHandshakeDeviceObject = NULL;
         } else {
-            debug_print("[+] driver_main: Handshake device object created successfully.\n");
-            status = IoCreateSymbolicLink(&g_handshake_symlink_name_us, &g_handshake_device_name_us);
-            if (!NT_SUCCESS(status)) {
-                debug_print("[-] driver_main: Failed to create symbolic link for handshake device. Status: 0x%X\n", status);
-                IoDeleteDevice(g_pHandshakeDeviceObject);
-                g_pHandshakeDeviceObject = NULL;
-                if (g_handshake_device_name_us.Buffer) ExFreePoolWithTag(g_handshake_device_name_us.Buffer, 'DevN');
-                if (g_handshake_symlink_name_us.Buffer) ExFreePoolWithTag(g_handshake_symlink_name_us.Buffer, 'SymL');
-                g_handshake_device_name_us.Buffer = NULL;
-                g_handshake_symlink_name_us.Buffer = NULL;
-            } else {
-                debug_print("[+] driver_main: Symbolic link for handshake device created successfully.\n");
-            }
+            debug_print("[+] driver_main: Symbolic link for handshake device created successfully with dynamic name.\n");
         }
-    } else {
-        debug_print("[-] driver_main: Skipping handshake device creation due to buffer allocation failures.\n");
     }
+
+    // If device creation or symlink fails (which would have happened in DriverEntry now),
+    // driver_main (this function) wouldn't even be called by IoCreateDriver.
+    // So, we can assume g_pHandshakeDeviceObject and g_dynamic_symlink_name_us are valid here if we reach this point.
+
+    // Write dynamic config to registry (symlink and IOCTL code were generated in DriverEntry)
+    status = WriteDynamicConfigToRegistry(&g_dynamic_symlink_name_us, g_dynamic_handshake_ioctl_code);
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] driver_main: CRITICAL - Failed to write dynamic config to registry. Status: 0x%X\n", status);
+        // Cleanup device and symlink that were created in DriverEntry before this call
+        if (g_pHandshakeDeviceObject) { // Check if it was created
+            IoDeleteSymbolicLink(&g_dynamic_symlink_name_us);
+            IoDeleteDevice(g_pHandshakeDeviceObject);
+            g_pHandshakeDeviceObject = NULL;
+        }
+        // This status will be returned by driver_main, and thus by IoCreateDriver.
+        return status;
+    }
+    debug_print("[+] driver_main: Dynamic config written to registry successfully.\n");
 
     KeInitializeSpinLock(&g_comm_lock);
 
@@ -1662,6 +1709,9 @@ NTSTATUS driver_main(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path
     driver_object->DriverUnload = [](PDRIVER_OBJECT drvObj) {
         debug_print("[+] Kernel Component: DriverUnload called.\n");
         UNREFERENCED_PARAMETER(drvObj);
+
+    // Delete dynamic config from registry first
+    DeleteDynamicConfigFromRegistry();
 
         if (g_discovery_thread_handle) {
             g_discovery_thread_should_run = FALSE;
@@ -1705,26 +1755,21 @@ NTSTATUS driver_main(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path
             debug_print("[+] DriverUnload: Target process dereferenced.\n");
         }
 
-        if (g_handshake_symlink_name_us.Buffer && g_handshake_symlink_name_us.Length > 0) {
-            if(g_pHandshakeDeviceObject != NULL) {
-                IoDeleteSymbolicLink(&g_handshake_symlink_name_us);
-                debug_print("[+] DriverUnload: Handshake symbolic link deleted.\n");
+        // Use dynamic symlink name for deletion
+        if (g_dynamic_symlink_name_us.Buffer && g_dynamic_symlink_name_us.Length > 0) {
+            if(g_pHandshakeDeviceObject != NULL) { // Check if device object exists before trying to delete symlink
+                IoDeleteSymbolicLink(&g_dynamic_symlink_name_us);
+                debug_print("[+] DriverUnload: Dynamic handshake symbolic link deleted.\n");
             }
         }
-        if (g_handshake_symlink_name_us.Buffer) {
-             ExFreePoolWithTag(g_handshake_symlink_name_us.Buffer, 'SymL');
-             g_handshake_symlink_name_us.Buffer = NULL;
-        }
+        // g_dynamic_symlink_name_us.Buffer points to global g_dynamic_symlink_name_buffer, no ExFreePoolWithTag needed.
 
         if (g_pHandshakeDeviceObject) {
             IoDeleteDevice(g_pHandshakeDeviceObject);
             g_pHandshakeDeviceObject = NULL;
-            debug_print("[+] DriverUnload: Handshake device object deleted.\n");
+            debug_print("[+] DriverUnload: Dynamic handshake device object deleted.\n");
         }
-        if (g_handshake_device_name_us.Buffer) {
-            ExFreePoolWithTag(g_handshake_device_name_us.Buffer, 'DevN');
-            g_handshake_device_name_us.Buffer = NULL;
-        }
+        // g_dynamic_device_name_us.Buffer points to global g_dynamic_device_name_buffer, no ExFreePoolWithTag needed.
 
         if (g_obfuscated_ptr1_um_addr_via_handshake) g_obfuscated_ptr1_um_addr_via_handshake = NULL;
 
@@ -1734,8 +1779,159 @@ NTSTATUS driver_main(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path
 }
 
 NTSTATUS DriverEntry() {
-    debug_print("[+] Windows Kernel Audio Component.\n");
-    UNICODE_STRING driver_name{};
-    RtlInitUnicodeString(&driver_name, L"\\Driver\\SysCoreCom");
-    return IoCreateDriver(&driver_name, driver_main);
+    debug_print("[+] Windows Kernel Audio Component (DriverEntry).\n");
+    NTSTATUS status = STATUS_SUCCESS;
+
+    // Initialize PRNG seed (used by GetRandomUlongRange and for pool tags)
+    LARGE_INTEGER tickCountSeed;
+    KeQueryTickCount(&tickCountSeed);
+    g_prng_seed = tickCountSeed.LowPart ^ tickCountSeed.HighPart;
+    if (g_prng_seed == 0) g_prng_seed = 1; // Ensure non-zero seed
+
+    // Initialize Dynamic Pool Tags
+    ULONG dynamic_pool_xor_key = GetRandomUlongRange(1, 0xFFFFFFFF);
+    g_pool_tag_devn = 'DevN' ^ dynamic_pool_xor_key;
+    g_pool_tag_syml = 'SymL' ^ dynamic_pool_xor_key;
+    g_pool_tag_wkit = 'WkIt' ^ dynamic_pool_xor_key;
+    g_pool_tag_nmbf = 'NmBf' ^ dynamic_pool_xor_key;
+    debug_print("[+] DriverEntry: Dynamic Pool Tags Initialized (XOR Key: 0x%X): DevN=0x%X, SymL=0x%X, WkIt=0x%X, NmBf=0x%X\n",
+        dynamic_pool_xor_key, g_pool_tag_devn, g_pool_tag_syml, g_pool_tag_wkit, g_pool_tag_nmbf);
+
+    // Generate dynamic driver object name
+    GUID randomGuidDriver;
+    status = ExUuidCreate(&randomGuidDriver);
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] DriverEntry: ExUuidCreate for driver name failed. Status: 0x%X.\n", status);
+        return status;
+    }
+    UNICODE_STRING guidStringDriver;
+    status = RtlStringFromGUID(randomGuidDriver, &guidStringDriver);
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] DriverEntry: RtlStringFromGUID for driver name failed. Status: 0x%X.\n", status);
+        // No need to free guidStringDriver if RtlStringFromGUID failed and didn't allocate.
+        return status;
+    }
+
+    WCHAR shortGuidPart[9]; // 8 chars + null
+    // Example: {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} -> take first 8 'x'
+    wcsncpy_s(shortGuidPart, sizeof(shortGuidPart)/sizeof(WCHAR), guidStringDriver.Buffer + 1, 8);
+    RtlZeroMemory(g_dynamic_driver_name_buffer, sizeof(g_dynamic_driver_name_buffer));
+    // Use a slightly different prefix for driver name if desired, e.g. L"\\Driver\\CSCDrv_"
+    swprintf_s(g_dynamic_driver_name_buffer, sizeof(g_dynamic_driver_name_buffer)/sizeof(WCHAR), L"%s%s", DRIVER_NAME_PREFIX_STATIC, shortGuidPart);
+    RtlInitUnicodeString(&g_dynamic_driver_name_us, g_dynamic_driver_name_buffer);
+    RtlFreeUnicodeString(&guidStringDriver); // Free the string allocated by RtlStringFromGUID
+    debug_print("[+] DriverEntry: Dynamic Driver Name for IoCreateDriver: %wZ\n", &g_dynamic_driver_name_us);
+
+    // Call IoCreateDriver with the dynamically generated driver name
+    status = IoCreateDriver(&g_dynamic_driver_name_us, driver_main);
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] DriverEntry: IoCreateDriver failed with dynamic name. Status: 0x%X\n", status);
+        // Clear the dynamic driver name buffer if necessary, though it's global.
+        g_dynamic_driver_name_us.Length = 0;
+    } else {
+        debug_print("[+] DriverEntry: IoCreateDriver call succeeded.\n");
+    }
+    return status;
+}
+
+// Helper function to get a random ULONG in a range.
+// Uses g_prng_seed which should be initialized (e.g. in driver_main).
+ULONG GetRandomUlongRange(ULONG min_val, ULONG max_val) {
+    if (min_val > max_val) { // Basic validation
+        return min_val; // Or some default/error indicator
+    }
+    if (g_prng_seed == 0) { // Ensure seed is not zero, which can be problematic for some PRNGs
+        LARGE_INTEGER tickSeedLocal; // Use local to avoid KeQueryTickCount if seed is already set by caller
+        KeQueryTickCount(&tickSeedLocal);
+        g_prng_seed = tickSeedLocal.LowPart ^ tickSeedLocal.HighPart;
+        if(g_prng_seed == 0) g_prng_seed = 1; // Ensure it's non-zero
+    }
+    // Use RtlRandomEx for better randomness than a simple LCG.
+    // RtlRandomEx updates the seed value itself.
+    ULONG random_value = RtlRandomEx(&g_prng_seed);
+    return min_val + (random_value % (max_val - min_val + 1));
+}
+
+NTSTATUS WriteDynamicConfigToRegistry(PUNICODE_STRING symlinkName, ULONG ioctlCode) {
+    NTSTATUS status;
+    HANDLE hKey;
+    UNICODE_STRING regPath;
+    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\SOFTWARE\\CoreSystemServices\\DynamicConfig");
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateKey(&hKey, KEY_WRITE, &oa, 0, NULL, REG_OPTION_NON_VOLATILE, NULL);
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] WriteDynamicConfigToRegistry: ZwCreateKey failed. Status: 0x%X\n", status);
+        return status;
+    }
+
+    UNICODE_STRING devicePathValueName;
+    RtlInitUnicodeString(&devicePathValueName, L"DevicePath");
+    status = ZwSetValueKey(hKey, &devicePathValueName, 0, REG_SZ, symlinkName->Buffer, symlinkName->Length + sizeof(WCHAR)); // Include null terminator
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] WriteDynamicConfigToRegistry: ZwSetValueKey for DevicePath failed. Status: 0x%X\n", status);
+        ZwClose(hKey);
+        return status;
+    }
+    debug_print("[+] WriteDynamicConfigToRegistry: DevicePath written: %wZ\n", symlinkName);
+
+    UNICODE_STRING handshakeCodeValueName;
+    RtlInitUnicodeString(&handshakeCodeValueName, L"HandshakeCode");
+    status = ZwSetValueKey(hKey, &handshakeCodeValueName, 0, REG_DWORD, &ioctlCode, sizeof(ioctlCode));
+    if (!NT_SUCCESS(status)) {
+        debug_print("[-] WriteDynamicConfigToRegistry: ZwSetValueKey for HandshakeCode failed. Status: 0x%X\n", status);
+        ZwClose(hKey);
+        return status;
+    }
+    debug_print("[+] WriteDynamicConfigToRegistry: HandshakeCode written: 0x%X\n", ioctlCode);
+
+    ZwClose(hKey);
+    return STATUS_SUCCESS;
+}
+
+VOID DeleteDynamicConfigFromRegistry() {
+    NTSTATUS status;
+    HANDLE hKey;
+    UNICODE_STRING regPath;
+    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\SOFTWARE\\CoreSystemServices\\DynamicConfig");
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwOpenKey(&hKey, KEY_SET_VALUE, &oa); // KEY_SET_VALUE allows deleting values
+    if (!NT_SUCCESS(status)) {
+        if (status != STATUS_OBJECT_NAME_NOT_FOUND) { // Don't log error if key simply doesn't exist
+            debug_print("[-] DeleteDynamicConfigFromRegistry: ZwOpenKey failed. Status: 0x%X\n", status);
+        }
+        return;
+    }
+
+    UNICODE_STRING devicePathValueName;
+    RtlInitUnicodeString(&devicePathValueName, L"DevicePath");
+    status = ZwDeleteValueKey(hKey, &devicePathValueName);
+    if (!NT_SUCCESS(status) && status != STATUS_OBJECT_NAME_NOT_FOUND) {
+        debug_print("[-] DeleteDynamicConfigFromRegistry: ZwDeleteValueKey for DevicePath failed. Status: 0x%X\n", status);
+    } else if (NT_SUCCESS(status)) {
+        debug_print("[+] DeleteDynamicConfigFromRegistry: DevicePath value deleted.\n");
+    }
+
+
+    UNICODE_STRING handshakeCodeValueName;
+    RtlInitUnicodeString(&handshakeCodeValueName, L"HandshakeCode");
+    status = ZwDeleteValueKey(hKey, &handshakeCodeValueName);
+    if (!NT_SUCCESS(status) && status != STATUS_OBJECT_NAME_NOT_FOUND) {
+        debug_print("[-] DeleteDynamicConfigFromRegistry: ZwDeleteValueKey for HandshakeCode failed. Status: 0x%X\n", status);
+    } else if (NT_SUCCESS(status)) {
+        debug_print("[+] DeleteDynamicConfigFromRegistry: HandshakeCode value deleted.\n");
+    }
+
+    // Optionally delete the DynamicConfig key itself if it's empty or owned by this driver
+    // status = ZwDeleteKey(hKey);
+    // if (!NT_SUCCESS(status)) {
+    //    debug_print("[-] DeleteDynamicConfigFromRegistry: ZwDeleteKey for DynamicConfig failed. Status: 0x%X (This may be OK if key has other subkeys/values not owned by us)\n", status);
+    // } else {
+    //    debug_print("[+] DeleteDynamicConfigFromRegistry: DynamicConfig key deleted.\n");
+    // }
+
+    ZwClose(hKey);
 }

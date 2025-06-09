@@ -59,6 +59,7 @@ enum class SlotStatus : uint32_t {
     UM_ACKNOWLEDGED
 };
 
+#pragma pack(push, 1) // Ensure consistent packing with KM
 struct CommunicationSlot {
     volatile SlotStatus status;
     uint32_t request_id;
@@ -76,6 +77,8 @@ struct CommunicationSlot {
     // Added for ChaCha20 + Poly1305
     uint8_t nonce[12]; // ChaCha20 Nonce/IV
     uint8_t mac_tag[16];   // Poly1305 MAC Tag (renamed from mac)
+    uint8_t UserPadding1[7]; // Matches KernelPadding1[7]
+    uint8_t UserPadding2[13]; // Matches KernelPadding2[13]
 };
 
 struct SharedCommBlock {
@@ -85,18 +88,16 @@ struct SharedCommBlock {
     CommunicationSlot slots[MAX_COMM_SLOTS];
     volatile uint64_t honeypot_field; // Added honeypot field
     volatile ULONG km_fully_initialized_flag; // Added for KM ready signal
+    uint8_t UserPaddingBlock[11]; // Matches KernelPaddingBlock[11]
 };
+#pragma pack(pop) // Restore default packing
 
 namespace StealthComm {
 
 // --- START: Definitions for UM->KM Handshake (must match KM) ---
-// Use a well-known GUID for UM to find. In a real scenario, this might be more dynamic or obfuscated.
-const WCHAR HANDSHAKE_DEVICE_SYMLINK_NAME_UM[] = L"\\\\Global??\\CoreSysComLink_{E7A1B02C-0D9F-45C1-9D8E-F6B5C4A3210F}";
-// Note: KM uses L"\\DosDevices\\CoreSysComLink_{...}". For UM access, typically \\Global??\\ or \\??\\ is used.
-// If UM is not session 0, \\Global??\\ is often required.
-
-// Define the IOCTL code for handshake (must match KM)
-#define IOCTL_STEALTH_HANDSHAKE_UM CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+// These are now dynamically read from the registry in InitializeStealthComm.
+// const WCHAR HANDSHAKE_DEVICE_SYMLINK_NAME_UM[] = L"\\\\Global??\\CoreSysComLink_{E7A1B02C-0D9F-45C1-9D8E-F6B5C4A3210F}";
+// #define IOCTL_STEALTH_HANDSHAKE_UM CTL_CODE(FILE_DEVICE_UNKNOWN, 0x901, METHOD_BUFFERED, FILE_WRITE_ACCESS)
 
 #define BEACON_PATTERN_SIZE 16 // Define beacon size
 
@@ -105,7 +106,8 @@ typedef struct _STEALTH_HANDSHAKE_DATA_UM {
     PVOID ObfuscatedPtrStruct1HeadUmAddress; // UM VA
     UINT64 VerificationToken; // Optional: for UM/KM to verify each other
     UINT8 BeaconPattern[BEACON_PATTERN_SIZE]; // Beacon pattern to help KM find DynamicSignaturesRelay
-} STEALTH_HANDshake_DATA_UM, *PSTEALTH_HANDSHAKE_DATA_UM;
+    UINT64 BeaconSalt; // Added BeaconSalt
+} STEALTH_HANDSHAKE_DATA_UM, *PSTEALTH_HANDSHAKE_DATA_UM;
 // --- END: Definitions for UM->KM Handshake ---
 
 // Structure to hold dynamic signatures and keys, to be relayed to KM
@@ -154,24 +156,29 @@ extern std::atomic<uint32_t> g_next_request_id;
 NTSTATUS InitializeStealthComm(); // Changed return type from bool to NTSTATUS
 void ShutdownStealthComm(); // Added for proper deallocation
 
-bool SubmitRequestAndWait(
+// NTSTATUS version of SubmitRequestAndWait - this is the one to keep and use.
+// The bool version will be removed from the .cpp file.
+NTSTATUS SubmitRequestAndWait(
     CommCommand command,
     uint64_t target_pid,
     const uint8_t* params,
     uint32_t params_size,
     uint8_t* output_buf,
     uint32_t& output_size, // In: max_size, Out: actual_size
-    uint64_t& km_status_code,
+    // uint64_t& km_status_code, // Removed, NTSTATUS return is used for overall status
     uint32_t timeout_ms = 5000
 );
 
-bool ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read);
-bool WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written);
-uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name);
+// Public API functions to be updated to use the NTSTATUS SubmitRequestAndWait
+// and return NTSTATUS or handle it internally.
+
+NTSTATUS ReadMemory(uint64_t target_pid, uintptr_t address, void* buffer, size_t size, size_t* bytes_read);
+NTSTATUS WriteMemory(uint64_t target_pid, uintptr_t address, const void* buffer, size_t size, size_t* bytes_written);
+uintptr_t GetModuleBase(uint64_t target_pid, const wchar_t* module_name); // Returns 0 on failure
 uintptr_t AobScan(uint64_t target_pid, uintptr_t start_address, size_t scan_size,
-                  const char* pattern, const char* mask, // Assuming pattern is combined or KM handles mask
-                  uint8_t* out_saved_bytes, size_t saved_bytes_size); // Note: saved_bytes not currently filled by KM
-uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address);
-bool FreeMemory(uint64_t target_pid, uintptr_t address, size_t size); // Added to free allocated memory
+                  const char* pattern, const char* mask,
+                  uint8_t* out_saved_bytes, size_t saved_bytes_size); // Returns 0 on failure, saved_bytes not currently filled
+uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address = 0); // Returns 0 on failure
+NTSTATUS FreeMemory(uint64_t target_pid, uintptr_t address, size_t size);
 
 } // namespace StealthComm
