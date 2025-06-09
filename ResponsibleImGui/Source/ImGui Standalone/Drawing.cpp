@@ -31,6 +31,9 @@
 
 #include <iomanip>
 
+// Static global for the target module name
+static std::wstring g_wModuleName = L"Destiny 2.exe";
+
 // Definition for the background AOB scanning thread function
 void AsyncInitializeSignaturesAndBytes_ThreadFunc(uintptr_t moduleBase, DWORD processId) {
     if (moduleBase == 0 || processId == 0) {
@@ -238,15 +241,13 @@ static void DisableAndCleanupAllFeatures(DWORD pid_param) {
 
     // AbilityCharge
     if (AbilityCharge::Enabled && AbilityCharge::InstructionAddress.load() != 0) {
-        // Assuming PollAbilityCharge handles restoration if key is up.
-        // For shutdown, explicitly restore if address is known.
         DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress.load(), AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes));
-        if (AbilityCharge::memAllocatedAddress.load() != 0) { // Check if cave was used
-             // Call ReleaseCodecave if AbilityCharge has its own mem_allocated flag and it's true
-             // Features::ReleaseCodecave(pid_param, AbilityCharge::memAllocatedAddress, AbilityCharge::ability_charge_mem_allocated_flag);
-            LogMessage("[-] AbilityCharge hook bytes restored. Cave release depends on specific management.");
+        LogMessageF("[-] AbilityCharge hook bytes restored at 0x%llX.", AbilityCharge::InstructionAddress.load());
+        if (AbilityCharge::mem_allocated && AbilityCharge::memAllocatedAddress.load() != 0) {
+            Features::ReleaseCodecave(pid_param, AbilityCharge::memAllocatedAddress, AbilityCharge::mem_allocated);
+            LogMessage("[-] AbilityCharge codecave released.");
         } else {
-            LogMessage("[-] AbilityCharge hook bytes restored (no specific cave address).");
+            LogMessage("[-] AbilityCharge (no codecave to release or not allocated by this feature).");
         }
         AbilityCharge::Enabled = false;
     }
@@ -331,11 +332,11 @@ static void DisableAndCleanupAllFeatures(DWORD pid_param) {
     }
     StopFlyThread = true;
     if (FlyThread.joinable()) {
-        LogMessage("[+] Joining FlyThread...");
+        LogMessage("[+] DisableAndCleanupAllFeatures: Joining FlyThread...");
         FlyThread.join();
-        LogMessage("[+] FlyThread joined.");
+        LogMessage("[+] DisableAndCleanupAllFeatures: FlyThread joined.");
     } else {
-        LogMessage("[!] FlyThread was not joinable (already joined or not started).");
+        LogMessage("[!] DisableAndCleanupAllFeatures: FlyThread was not joinable at shutdown (might be normal if never started or already stopped).");
     }
 
     ImmuneBosses::Enabled.store(false);
@@ -372,6 +373,98 @@ static void DisableAndCleanupAllFeatures(DWORD pid_param) {
 static std::map<std::string, bool> g_feature_critical_error_flags; // UI error flags
 static DWORD g_current_pid_drawing = 0;
 static uintptr_t g_moduleBaseAddress_drawing = 0;
+
+// New function to reset all feature states, typically on process loss
+static void ResetAllFeatureStates() {
+    LogMessage("[+] Resetting all feature states, addresses, and flags.");
+
+    // --- Killaura ---
+    Killaura::InstructionAddress.store(0); Killaura::memAllocatedAddress.store(0); Killaura::mem_allocated = false; Killaura::Enabled = false; g_feature_critical_error_flags["Killaura"] = false;
+    // --- LocalPlayer ---
+    LocalPlayer::InstructionAddress.store(0); LocalPlayer::memAllocatedAddress.store(0); LocalPlayer::mem_allocated = false; LocalPlayer::Enabled = false; g_feature_critical_error_flags["LocalPlayer"] = false;
+    LocalPlayer::addrMemAllocatedAddress.store(0); LocalPlayer::addr_mem_allocated = false;
+    LocalPlayer::disableGravAddress.store(0); LocalPlayer::disableGravMemAllocatedAddress.store(0); LocalPlayer::disableGrav_mem_allocated = false;
+    LocalPlayer::realPlayer.store(0); LocalPlayer::flyEnabled = false; LocalPlayer::KillKeyEnabled = false;
+    // --- ViewAngles ---
+    ViewAngles::InstructionAddress.store(0); ViewAngles::memAllocatedAddress.store(0); ViewAngles::mem_allocated = false; /*ViewAngles::Enabled is tied to LocalPlayer*/ g_feature_critical_error_flags["ViewAngles"] = false;
+    ViewAngles::addrMemAllocatedAddress.store(0); ViewAngles::addr_mem_allocated = false;
+    ViewAngles::g_viewBase.store(0); ViewAngles::g_cacheThreadRunning.store(false);
+    // --- Ghostmode ---
+    Ghostmode::InstructionAddress.store(0); Ghostmode::memAllocatedAddress.store(0); Ghostmode::mem_allocated = false; Ghostmode::Enabled = false; g_feature_critical_error_flags["Ghostmode"] = false;
+    // --- Godmode ---
+    Godmode::InstructionAddress.store(0); Godmode::memAllocatedAddress.store(0); Godmode::mem_allocated = false; Godmode::Enabled = false; g_feature_critical_error_flags["Godmode"] = false;
+    // --- InfAmmo & InfSwordAmmo ---
+    InfAmmo::InstructionAddress.store(0); InfAmmo::memAllocatedAddress.store(0); InfAmmo::mem_allocated = false; InfAmmo::Enabled = false; g_feature_critical_error_flags["InfAmmo"] = false;
+    InfSwordAmmo::InstructionAddress.store(0); // InfSwordAmmo has no Enabled flag of its own or mem_allocated
+    // --- dmgMult ---
+    dmgMult::InstructionAddress.store(0); dmgMult::memAllocatedAddress.store(0); dmgMult::mem_allocated = false; dmgMult::Enabled = false; g_feature_critical_error_flags["dmgMult"] = false;
+    // --- FOV ---
+    FOV::ptr.store(0); // FOV::fov is a value, not a flag, reset if needed based on default. FOV::Enabled doesn't exist.
+    // --- RPM ---
+    RPM::InstructionAddress.store(0); RPM::memAllocatedAddress.store(0); RPM::mem_allocated = false; RPM::Enabled = false; g_feature_critical_error_flags["RPM"] = false;
+    // --- NoRecoil ---
+    NoRecoil::InstructionAddress.store(0); NoRecoil::memAllocatedAddress.store(0); NoRecoil::mem_allocated = false; NoRecoil::Enabled = false; g_feature_critical_error_flags["NoRecoil"] = false;
+    // --- OHK ---
+    OHK::InstructionAddress.store(0); OHK::memAllocatedAddress.store(0); OHK::mem_allocated = false; OHK::Enabled = false; g_feature_critical_error_flags["OHK"] = false;
+    // --- NoJoinAllies ---
+    NoJoinAllies::InstructionAddress.store(0); NoJoinAllies::Enabled = false; g_feature_critical_error_flags["NoJoinAllies"] = false;
+    // --- NoTurnBack ---
+    NoTurnBack::InstructionAddress.store(0); NoTurnBack::Enabled = false; g_feature_critical_error_flags["NoTurnBack"] = false;
+    // --- SparrowAnywhere ---
+    SparrowAnywhere::InstructionAddress.store(0); SparrowAnywhere::Enabled = false; g_feature_critical_error_flags["SparrowAnywhere"] = false;
+    // --- InfStacks ---
+    InfStacks::InstructionAddress.store(0); InfStacks::memAllocatedAddress.store(0); InfStacks::mem_allocated = false; InfStacks::Enabled = false; g_feature_critical_error_flags["InfStacks"] = false;
+    // --- NoRezTokens ---
+    NoRezTokens::InstructionAddress.store(0); NoRezTokens::Enabled = false; g_feature_critical_error_flags["NoRezTokens"] = false;
+    // --- InstaRespawn & RespawnAnywhere ---
+    InstaRespawn::InstructionAddress.store(0); InstaRespawn::Enabled = false; g_feature_critical_error_flags["InstaRespawn"] = false;
+    RespawnAnywhere::InstructionAddress.store(0); RespawnAnywhere::memAllocatedAddress.store(0); RespawnAnywhere::mem_allocated = false; // RespawnAnywhere::Enabled is tied to InstaRespawn::Enabled
+    // --- ShootThru ---
+    ShootThru::InstructionAddress.store(0); ShootThru::Enabled = false; g_feature_critical_error_flags["ShootThru"] = false;
+    // --- Chams ---
+    Chams::InstructionAddress.store(0); Chams::memAllocatedAddress.store(0); Chams::mem_allocated = false; Chams::Enabled = false; g_feature_critical_error_flags["Chams"] = false;
+    // --- ImmuneBosses ---
+    ImmuneBosses::Address.store(0); ImmuneBosses::Enabled.store(false); ImmuneBosses::ThreadRunning.store(false); // No specific error flag in g_feature_critical_error_flags for this one typically
+    // --- AbilityCharge ---
+    AbilityCharge::InstructionAddress.store(0); AbilityCharge::memAllocatedAddress.store(0); AbilityCharge::mem_allocated = false; AbilityCharge::Enabled = false; g_feature_critical_error_flags["AbilityCharge"] = false; AbilityCharge::WasKeyDown = false;
+    // --- ImmuneAura ---
+    ImmuneAura::InstructionAddress.store(0); ImmuneAura::memAllocatedAddress.store(0); ImmuneAura::mem_allocated = false; ImmuneAura::Enabled = false; g_feature_critical_error_flags["ImmuneAura"] = false;
+    // --- IcarusDash ---
+    IcarusDash::InstructionAddress.store(0); IcarusDash::Enabled = false; g_feature_critical_error_flags["IcarusDash"] = false;
+    // --- InstantInteract ---
+    InstantInteract::InstructionAddress.store(0); InstantInteract::memAllocatedAddress.store(0); InstantInteract::mem_allocated = false; InstantInteract::Enabled = false; g_feature_critical_error_flags["InstantInteract"] = false;
+    // --- InteractThruWalls ---
+    InteractThruWalls::InstructionAddress1.store(0); InteractThruWalls::memAllocatedAddress1.store(0); InteractThruWalls::mem_allocated1 = false;
+    InteractThruWalls::InstructionAddress2.store(0); InteractThruWalls::memAllocatedAddress2.store(0); InteractThruWalls::mem_allocated2 = false;
+    InteractThruWalls::Enabled = false; g_feature_critical_error_flags["InteractThruWalls"] = false;
+    // --- GameSpeed ---
+    GameSpeed::Address.store(0); GameSpeed::Enabled = false; GameSpeed::WasKeyDown = false; // No specific error flag
+    // --- LobbyCrasher ---
+    LobbyCrasher::InstructionAddress.store(0); LobbyCrasher::Enabled = false; g_feature_critical_error_flags["LobbyCrasher"] = false;
+    // --- GSize ---
+    GSize::Address.store(0); GSize::Enabled = false; // GSize::Value and inputVal are UI state, reset if desired, but not critical addresses.
+    // --- Oxygen ---
+    Oxygen::InstructionAddress.store(0); Oxygen::Enabled = false; g_feature_critical_error_flags["Oxygen"] = false;
+    // --- InfSparrowBoost ---
+    InfSparrowBoost::InstructionAddress.store(0); InfSparrowBoost::Enabled = false; g_feature_critical_error_flags["InfSparrowBoost"] = false;
+    // --- InfBuffTimers ---
+    InfBuffTimers::InstructionAddress.store(0); InfBuffTimers::Enabled = false; g_feature_critical_error_flags["InfBuffTimers"] = false;
+    // --- InfExoticBuffTimers ---
+    InfExoticBuffTimers::InstructionAddress.store(0); InfExoticBuffTimers::Enabled = false; g_feature_critical_error_flags["InfExoticBuffTimers"] = false;
+    // --- AntiFlinch ---
+    AntiFlinch::InstructionAddress1.store(0); AntiFlinch::InstructionAddress2.store(0); AntiFlinch::InstructionAddress3.store(0); AntiFlinch::Enabled = false; g_feature_critical_error_flags["AntiFlinch"] = false;
+    // --- ActivityLoader ---
+    ActivityLoader::InstructionAddress.store(0); ActivityLoader::memAllocatedAddress.store(0); ActivityLoader::mem_allocated = false;
+    ActivityLoader::addrMemAllocatedAddress.store(0); ActivityLoader::addr_mem_allocated = false;
+    ActivityLoader::Enabled = false; g_feature_critical_error_flags["ActivityLoader"] = false;
+    // --- Mag999 ---
+    Mag999::InstructionAddress.store(0); Mag999::memAllocatedAddress.store(0); Mag999::mem_allocated = false; Mag999::Enabled = false; g_feature_critical_error_flags["Mag999"] = false;
+
+    // Reset main state vars associated with process
+    isInitialized = false;
+    g_current_pid_drawing = 0;
+    g_moduleBaseAddress_drawing = 0;
+}
 
 static bool wasKillauraEnabled = false;
 static bool wasViewAnglesEnabled = false;
@@ -533,11 +626,15 @@ void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t desti
 
         if (Features::LocalPlayer::flyEnabled) {
             StopFlyThread = false;
-            if (FlyThread.joinable()) FlyThread.join();
+            if (FlyThread.joinable()) {
+                // LogMessage("[+] [PollFly] Previous FlyThread is joinable, joining..."); // Optional: for debugging
+                FlyThread.join();
+                // LogMessage("[+] [PollFly] Previous FlyThread joined."); // Optional: for debugging
+            }
             FlyThread = std::thread(FlyLoop, destinyBaseForFly);
-            FlyThread.detach();
+            // FlyThread.detach(); // No longer detaching - thread is now joinable
             #ifdef _DEBUG
-            LogMessage("[+] [PollFly] FlyLoop thread started.");
+            LogMessage("[+] [PollFly] FlyLoop thread started (now joinable).");
             #endif
         }
     } else if (!Features::LocalPlayer::flyEnabled && previousFlyState) { // Just disabled Fly
@@ -650,12 +747,13 @@ void PollAbilityCharge() {
         if (AbilityCharge::InstructionAddress != 0) {
             // AbilityCharge::shellcode is std::vector<BYTE>
             // AbilityCharge::memAllocatedAddress will be used/allocated by InjectCodecave
-            uintptr_t temp_cave_addr = AbilityCharge::memAllocatedAddress; // InjectCodecave expects this by ref
-            if(Features::InjectCodecave(g_current_pid_drawing, AbilityCharge::InstructionAddress, AbilityCharge::shellcode, sizeof(AbilityCharge::origBytes), temp_cave_addr)){
-                AbilityCharge::memAllocatedAddress = temp_cave_addr; // Update if InjectCodecave allocated it
+            uintptr_t temp_cave_addr = AbilityCharge::memAllocatedAddress.load(); // Load atomic for passing by value if needed, InjectCodecave takes atomic by ref
+            if(Features::InjectCodecave(g_current_pid_drawing, AbilityCharge::InstructionAddress, AbilityCharge::shellcode, sizeof(AbilityCharge::origBytes), AbilityCharge::memAllocatedAddress)){
+                // AbilityCharge::memAllocatedAddress is updated by InjectCodecave directly
+                AbilityCharge::mem_allocated = true; // Mark as allocated
                 wasInjected = true;
                 #ifdef _DEBUG
-                LogMessageF("[+] [PollAbilityCharge] Activated (hooked) at 0x%llX. Codecave: 0x%llX.", AbilityCharge::InstructionAddress, temp_cave_addr);
+                LogMessageF("[+] [PollAbilityCharge] Activated (hooked) at 0x%llX. Codecave: 0x%llX.", AbilityCharge::InstructionAddress.load(), AbilityCharge::memAllocatedAddress.load());
                 #endif
             } else {
                 LogMessageF("[-] [PollAbilityCharge] InjectCodecave failed for 0x%llX.", AbilityCharge::InstructionAddress);
@@ -665,12 +763,17 @@ void PollAbilityCharge() {
         }
     } else if (!keyNowDown && currentKeyIsDown) { // Key just released
         if (wasInjected && AbilityCharge::InstructionAddress != 0) {
-            if (DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress, AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes))) {
+            if (DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress.load(), AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes))) {
                 #ifdef _DEBUG
-                LogMessageF("[-] [PollAbilityCharge] Deactivated (original bytes restored) at 0x%llX.", AbilityCharge::InstructionAddress);
+                LogMessageF("[-] [PollAbilityCharge] Deactivated (original bytes restored) at 0x%llX.", AbilityCharge::InstructionAddress.load());
                 #endif
+                // Release codecave if it was allocated by this feature instance
+                if (AbilityCharge::mem_allocated) {
+                    Features::ReleaseCodecave(g_current_pid_drawing, AbilityCharge::memAllocatedAddress, AbilityCharge::mem_allocated);
+                    // AbilityCharge::mem_allocated is set to false by ReleaseCodecave
+                }
             } else {
-                 LogMessageF("[-] [PollAbilityCharge] Failed to restore original bytes on key release for 0x%llX.", AbilityCharge::InstructionAddress);
+                 LogMessageF("[-] [PollAbilityCharge] Failed to restore original bytes on key release for 0x%llX.", AbilityCharge::InstructionAddress.load());
             }
             wasInjected = false;
         } else if (wasInjected) { // Address is 0 but was injected (should not happen if initial check is done)
@@ -1397,9 +1500,11 @@ void Drawing::Draw() {
                 Features::LocalPlayer::flyEnabled = false; // Disable feature
                 StopFlyThread = true; // Signal thread to stop
                 if (FlyThread.joinable()) {
-                    LogMessage("[+] Joining FlyThread due to process loss...");
+                    LogMessage("[+] Drawing::Draw (Process Loss): Joining FlyThread...");
                     FlyThread.join();
-                    LogMessage("[+] FlyThread joined.");
+                    LogMessage("[+] Drawing::Draw (Process Loss): FlyThread joined.");
+                } else {
+                    LogMessage("[!] Drawing::Draw (Process Loss): FlyThread was not joinable.");
                 }
 
                 // Stop any ongoing AOB scan
@@ -1417,102 +1522,7 @@ void Drawing::Draw() {
                     // g_aob_scan_complete_flag will be reset when a new scan is launched.
                 }
 
-
-                isInitialized = false;
-                g_current_pid_drawing = 0;
-                g_moduleBaseAddress_drawing = 0;
-                // Reset feature states that depend on addresses
-                // This is important so that stale addresses are not used if the game restarts with a different base.
-                // Features::PerformStartupAobScans(0, 0); // Call with 0 to effectively nullify addresses
-                // Instead of calling with 0, explicitly reset key atomic addresses to 0.
-                // This is safer as PerformStartupAobScans would try to call DriverComm::AOBScan with PID 0.
-                // Example (needs to be comprehensive for all features):
-                // The conceptual loop below is now replaced by explicit resets.
-                // for (auto& ns_ptr_pair : Features::feature_address_map_example) { ... }
-
-                LogMessage("[+] Resetting all feature states, addresses, and flags due to process loss.");
-
-                // --- Killaura ---
-                Killaura::InstructionAddress.store(0); Killaura::memAllocatedAddress.store(0); Killaura::mem_allocated = false; Killaura::Enabled = false; g_feature_critical_error_flags["Killaura"] = false;
-                // --- LocalPlayer ---
-                LocalPlayer::InstructionAddress.store(0); LocalPlayer::memAllocatedAddress.store(0); LocalPlayer::mem_allocated = false; LocalPlayer::Enabled = false; g_feature_critical_error_flags["LocalPlayer"] = false;
-                LocalPlayer::addrMemAllocatedAddress.store(0); LocalPlayer::addr_mem_allocated = false;
-                LocalPlayer::disableGravAddress.store(0); LocalPlayer::disableGravMemAllocatedAddress.store(0); LocalPlayer::disableGrav_mem_allocated = false;
-                LocalPlayer::realPlayer.store(0); LocalPlayer::flyEnabled = false; LocalPlayer::KillKeyEnabled = false;
-                // --- ViewAngles ---
-                ViewAngles::InstructionAddress.store(0); ViewAngles::memAllocatedAddress.store(0); ViewAngles::mem_allocated = false; /*ViewAngles::Enabled is tied to LocalPlayer*/ g_feature_critical_error_flags["ViewAngles"] = false;
-                ViewAngles::addrMemAllocatedAddress.store(0); ViewAngles::addr_mem_allocated = false;
-                ViewAngles::g_viewBase.store(0); ViewAngles::g_cacheThreadRunning.store(false);
-                // --- Ghostmode ---
-                Ghostmode::InstructionAddress.store(0); Ghostmode::memAllocatedAddress.store(0); Ghostmode::mem_allocated = false; Ghostmode::Enabled = false; g_feature_critical_error_flags["Ghostmode"] = false;
-                // --- Godmode ---
-                Godmode::InstructionAddress.store(0); Godmode::memAllocatedAddress.store(0); Godmode::mem_allocated = false; Godmode::Enabled = false; g_feature_critical_error_flags["Godmode"] = false;
-                // --- InfAmmo & InfSwordAmmo ---
-                InfAmmo::InstructionAddress.store(0); InfAmmo::memAllocatedAddress.store(0); InfAmmo::mem_allocated = false; InfAmmo::Enabled = false; g_feature_critical_error_flags["InfAmmo"] = false;
-                InfSwordAmmo::InstructionAddress.store(0); // InfSwordAmmo has no Enabled flag of its own or mem_allocated
-                // --- dmgMult ---
-                dmgMult::InstructionAddress.store(0); dmgMult::memAllocatedAddress.store(0); dmgMult::mem_allocated = false; dmgMult::Enabled = false; g_feature_critical_error_flags["dmgMult"] = false;
-                // --- FOV ---
-                FOV::ptr.store(0); // FOV::fov is a value, not a flag, reset if needed based on default. FOV::Enabled doesn't exist.
-                // --- RPM ---
-                RPM::InstructionAddress.store(0); RPM::memAllocatedAddress.store(0); RPM::mem_allocated = false; RPM::Enabled = false; g_feature_critical_error_flags["RPM"] = false;
-                // --- NoRecoil ---
-                NoRecoil::InstructionAddress.store(0); NoRecoil::memAllocatedAddress.store(0); NoRecoil::mem_allocated = false; NoRecoil::Enabled = false; g_feature_critical_error_flags["NoRecoil"] = false;
-                // --- OHK ---
-                OHK::InstructionAddress.store(0); OHK::memAllocatedAddress.store(0); OHK::mem_allocated = false; OHK::Enabled = false; g_feature_critical_error_flags["OHK"] = false;
-                // --- NoJoinAllies ---
-                NoJoinAllies::InstructionAddress.store(0); NoJoinAllies::Enabled = false; g_feature_critical_error_flags["NoJoinAllies"] = false;
-                // --- NoTurnBack ---
-                NoTurnBack::InstructionAddress.store(0); NoTurnBack::Enabled = false; g_feature_critical_error_flags["NoTurnBack"] = false;
-                // --- SparrowAnywhere ---
-                SparrowAnywhere::InstructionAddress.store(0); SparrowAnywhere::Enabled = false; g_feature_critical_error_flags["SparrowAnywhere"] = false;
-                // --- InfStacks ---
-                InfStacks::InstructionAddress.store(0); InfStacks::memAllocatedAddress.store(0); InfStacks::mem_allocated = false; InfStacks::Enabled = false; g_feature_critical_error_flags["InfStacks"] = false;
-                // --- NoRezTokens ---
-                NoRezTokens::InstructionAddress.store(0); NoRezTokens::Enabled = false; g_feature_critical_error_flags["NoRezTokens"] = false;
-                // --- InstaRespawn & RespawnAnywhere ---
-                InstaRespawn::InstructionAddress.store(0); InstaRespawn::Enabled = false; g_feature_critical_error_flags["InstaRespawn"] = false;
-                RespawnAnywhere::InstructionAddress.store(0); RespawnAnywhere::memAllocatedAddress.store(0); RespawnAnywhere::mem_allocated = false; // RespawnAnywhere::Enabled is tied to InstaRespawn::Enabled
-                // --- ShootThru ---
-                ShootThru::InstructionAddress.store(0); ShootThru::Enabled = false; g_feature_critical_error_flags["ShootThru"] = false;
-                // --- Chams ---
-                Chams::InstructionAddress.store(0); Chams::memAllocatedAddress.store(0); Chams::mem_allocated = false; Chams::Enabled = false; g_feature_critical_error_flags["Chams"] = false;
-                // --- ImmuneBosses ---
-                ImmuneBosses::Address.store(0); ImmuneBosses::Enabled.store(false); ImmuneBosses::ThreadRunning.store(false); // No specific error flag in g_feature_critical_error_flags for this one typically
-                // --- AbilityCharge ---
-                AbilityCharge::InstructionAddress.store(0); AbilityCharge::memAllocatedAddress.store(0); /* No mem_allocated for AbilityCharge */ AbilityCharge::Enabled = false; g_feature_critical_error_flags["AbilityCharge"] = false; AbilityCharge::WasKeyDown = false;
-                // --- ImmuneAura ---
-                ImmuneAura::InstructionAddress.store(0); ImmuneAura::memAllocatedAddress.store(0); ImmuneAura::mem_allocated = false; ImmuneAura::Enabled = false; g_feature_critical_error_flags["ImmuneAura"] = false;
-                // --- IcarusDash ---
-                IcarusDash::InstructionAddress.store(0); IcarusDash::Enabled = false; g_feature_critical_error_flags["IcarusDash"] = false;
-                // --- InstantInteract ---
-                InstantInteract::InstructionAddress.store(0); InstantInteract::memAllocatedAddress.store(0); InstantInteract::mem_allocated = false; InstantInteract::Enabled = false; g_feature_critical_error_flags["InstantInteract"] = false;
-                // --- InteractThruWalls ---
-                InteractThruWalls::InstructionAddress1.store(0); InteractThruWalls::memAllocatedAddress1.store(0); InteractThruWalls::mem_allocated1 = false;
-                InteractThruWalls::InstructionAddress2.store(0); InteractThruWalls::memAllocatedAddress2.store(0); InteractThruWalls::mem_allocated2 = false;
-                InteractThruWalls::Enabled = false; g_feature_critical_error_flags["InteractThruWalls"] = false;
-                // --- GameSpeed ---
-                GameSpeed::Address.store(0); GameSpeed::Enabled = false; GameSpeed::WasKeyDown = false; // No specific error flag
-                // --- LobbyCrasher ---
-                LobbyCrasher::InstructionAddress.store(0); LobbyCrasher::Enabled = false; g_feature_critical_error_flags["LobbyCrasher"] = false;
-                // --- GSize ---
-                GSize::Address.store(0); GSize::Enabled = false; // GSize::Value and inputVal are UI state, reset if desired, but not critical addresses.
-                // --- Oxygen ---
-                Oxygen::InstructionAddress.store(0); Oxygen::Enabled = false; g_feature_critical_error_flags["Oxygen"] = false;
-                // --- InfSparrowBoost ---
-                InfSparrowBoost::InstructionAddress.store(0); InfSparrowBoost::Enabled = false; g_feature_critical_error_flags["InfSparrowBoost"] = false;
-                // --- InfBuffTimers ---
-                InfBuffTimers::InstructionAddress.store(0); InfBuffTimers::Enabled = false; g_feature_critical_error_flags["InfBuffTimers"] = false;
-                // --- InfExoticBuffTimers ---
-                InfExoticBuffTimers::InstructionAddress.store(0); InfExoticBuffTimers::Enabled = false; g_feature_critical_error_flags["InfExoticBuffTimers"] = false;
-                // --- AntiFlinch ---
-                AntiFlinch::InstructionAddress1.store(0); AntiFlinch::InstructionAddress2.store(0); AntiFlinch::InstructionAddress3.store(0); AntiFlinch::Enabled = false; g_feature_critical_error_flags["AntiFlinch"] = false;
-                // --- ActivityLoader ---
-                ActivityLoader::InstructionAddress.store(0); ActivityLoader::memAllocatedAddress.store(0); ActivityLoader::mem_allocated = false;
-                ActivityLoader::addrMemAllocatedAddress.store(0); ActivityLoader::addr_mem_allocated = false;
-                ActivityLoader::Enabled = false; g_feature_critical_error_flags["ActivityLoader"] = false;
-                // --- Mag999 ---
-                Mag999::InstructionAddress.store(0); Mag999::memAllocatedAddress.store(0); Mag999::mem_allocated = false; Mag999::Enabled = false; g_feature_critical_error_flags["Mag999"] = false;
+                ResetAllFeatureStates(); // Call the new refactored function
 
                 // Reset AOB scan flags
                 Features::g_aob_scan_complete_flag.store(false);
@@ -1717,12 +1727,12 @@ void Drawing::Draw() {
 
     // Display AOB scan status
     if (Features::g_aob_scan_running.load() && !Features::g_aob_scan_complete_flag.load()) {
-        ImGui::SetCursorPosY(posY + xButtonSize_local + 10); // Adjust position as needed
+        ImGui::SetCursorPosY(posY + xButtonSize + 10); // Adjust position as needed
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("Scanning features...").x) * 0.5f);
         ImGui::TextDisabled("Scanning features...");
     }
 
-    ImGui::SetCursorPosY(posY + xButtonSize_local + 23); // Use xButtonSize_local
+    ImGui::SetCursorPosY(posY + xButtonSize + 23); // Use xButtonSize
     ImGui::Separator();
 
     // Begin the Tab Bar.
@@ -1803,7 +1813,7 @@ void Drawing::Draw() {
             RenderFeatureStatusIndicator("ImmuneAura", ImmuneAura::Enabled, ImmuneAura::InstructionAddress.load(), true, ImmuneAura::mem_allocated);
 
             RenderAbilityChargeUI(); // Hotkey only, no direct error state displayed here for toggle itself
-            RenderFeatureStatusIndicator("AbilityCharge", AbilityCharge::Enabled, AbilityCharge::InstructionAddress.load(), true, AbilityCharge::memAllocatedAddress.load() != 0);
+            RenderFeatureStatusIndicator("AbilityCharge", AbilityCharge::Enabled, AbilityCharge::InstructionAddress.load(), true, AbilityCharge::mem_allocated); // Use AbilityCharge::mem_allocated
 
             ImGui::Toggle("No Recoil", &NoRecoil::Enabled);
             if (g_feature_critical_error_flags["NoRecoil"]) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1.f,0.f,0.f,1.f), "(!) MODIFY FAIL"); if (ImGui::IsItemHovered()) ImGui::SetTooltip("No Recoil failed to disable correctly."); }

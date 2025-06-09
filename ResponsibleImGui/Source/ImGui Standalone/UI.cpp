@@ -1,7 +1,7 @@
 ﻿#include "UI.h"
 #include "Drawing.h"
-#include "UI.h"
-#include "Drawing.h"
+// #include "UI.h" // Removed duplicate
+// #include "Drawing.h" // Removed duplicate
 #include <dwmapi.h>
 #include <Windows.h>
 #include <iostream>
@@ -12,6 +12,9 @@
 #include "fonts\\Inter.h"            // Contains Inter_ttf and Inter_ttf_len
 #include "fonts/font_globals.h"
 #include "Logging.h" // For LogMessageF
+
+// Global for the target window name
+const wchar_t* g_targetWindowName = L"Destiny 2";
 
 // from fonts\Inter.h
 extern unsigned char Inter_ttf[];
@@ -65,7 +68,7 @@ void SetupFonts()
         // Fallback to hardcoded path if SHGetFolderPathW fails (less ideal)
         iconFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguiemj.tff", 16.0f, nullptr, io.Fonts->GetGlyphRangesDefault());
         if (iconFont == nullptr) {
-            LogMessage("[-] Fallback attempt to load icon font from C:\\Windows\\Fonts\\seguiemj.tff also failed. Icons may be missing.");
+            LogMessage("[-] Fallback attempt to load icon font from C:\\Windows\\Fonts\\seguiemj.tff also failed. Icons may be missing."); // Corrected this line
         } else {
             #ifdef _DEBUG
             LogMessage("[+] Icon font loaded successfully from fallback path: C:\\Windows\\Fonts\\seguiemj.tff");
@@ -80,6 +83,7 @@ IDXGISwapChain* UI::pSwapChain = nullptr;
 ID3D11RenderTargetView* UI::pMainRenderTargetView = nullptr;
 
 HMODULE UI::hCurrentModule = nullptr;
+std::atomic<bool> UI::bExitThread(false); // Initialization of bExitThread
 
 
 bool UI::CreateDeviceD3D(HWND hWnd)
@@ -211,7 +215,7 @@ void UI::Render()
     while (true)
     {
         // Removed redundant AllocConsole and freopen_s calls from here
-        HWND cand = FindWindow(NULL, L"Destiny 2");
+        HWND cand = FindWindow(NULL, g_targetWindowName);
         if (cand && GetWindowRect(cand, &destinyRect))
         {
             // Skip the “minimized” placeholder
@@ -283,9 +287,12 @@ void UI::Render()
 
     if (!CreateDeviceD3D(hwnd))
     {
-        CleanupDeviceD3D();
+        LogMessage("[-] UI::Render: CreateDeviceD3D failed. Cleaning up and returning.");
+        CleanupDeviceD3D(); // Already called within CreateDeviceD3D on failure, but good for explicit cleanup here too.
         ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
-        return;
+        // Optionally, display a MessageBox to the user.
+        MessageBoxA(nullptr, "Failed to initialize DirectX device. The application will now exit.", "Initialization Error", MB_OK | MB_ICONERROR);
+        return; // Exit Render() function
     }
 
     ::ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -333,12 +340,12 @@ void UI::Render()
     bool overlayEnabled = true;
     RECT lastDestinyRect = destinyRect;
     
-    while (!bDone)
+    while (!bDone && !UI::bExitThread.load()) // Modified loop condition
     {
         // Check if Destiny 2 is still running
         if (!IsWindow(destinyWindow))
         {
-            destinyWindow = FindWindow(NULL, L"Destiny 2");
+            destinyWindow = FindWindow(NULL, g_targetWindowName);
             if (!destinyWindow)
                 break; // Exit if Destiny 2 is closed
         }
@@ -445,8 +452,13 @@ void UI::Render()
     CreateThread(nullptr, NULL, (LPTHREAD_START_ROUTINE)FreeLibrary, hCurrentModule, NULL, nullptr);
 #endif
 
-    // Ensure FiraCode is the default font after all font additions
-    if (ImGui::GetIO().Fonts->Fonts.Size > 0) {
+    // Ensure Inter is the default font after all font additions
+    if (interFont) { // Check if interFont was loaded successfully
+        ImGui::GetIO().FontDefault = interFont;
+    } else if (ImGui::GetIO().Fonts->Fonts.Size > 0) { // Fallback to the first available font if interFont failed
         ImGui::GetIO().FontDefault = ImGui::GetIO().Fonts->Fonts[0];
+        LogMessage("[-] UI::Render: Default font 'interFont' was null, falling back to first available font.");
+    } else {
+        LogMessage("[-] UI::Render: No fonts available to set as default.");
     }
 }

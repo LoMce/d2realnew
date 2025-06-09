@@ -191,29 +191,10 @@ static VOID PrepareForUnload() {
 
     // Stop Discovery Thread (though it should have exited after handshake)
     if (g_discovery_thread_handle) {
-        g_discovery_thread_should_run = FALSE; // Signal
-        // Attempt to get a reference to the thread object to wait for it.
-        PETHREAD discovery_thread_object_ref = NULL;
-        NTSTATUS status_ref_discovery = ObReferenceObjectByHandle(
-            g_discovery_thread_handle,
-            THREAD_ALL_ACCESS, // Or THREAD_QUERY_INFORMATION | SYNCHRONIZE
-            *PsThreadType,
-            KernelMode,
-            (PVOID*)&discovery_thread_object_ref,
-            NULL
-        );
-
-        if (NT_SUCCESS(status_ref_discovery) && discovery_thread_object_ref) {
-            debug_print("[+] PrepareForUnload: Waiting for DiscoveryAndAttachmentThread to terminate.\n");
-            KeWaitForSingleObject(discovery_thread_object_ref, Executive, KernelMode, FALSE, NULL);
-            ObDereferenceObject(discovery_thread_object_ref);
-            debug_print("[+] PrepareForUnload: DiscoveryAndAttachmentThread terminated.\n");
-        } else {
-            debug_print("[-] PrepareForUnload: Failed to reference/wait for DiscoveryAndAttachmentThread. Status: 0x%X. It might have already exited.\n", status_ref_discovery);
-        }
-        // We close the handle in DriverUnload, not here, to avoid issues if DriverUnload is called separately.
-        // ZwClose(g_discovery_thread_handle);
-        // g_discovery_thread_handle = NULL;
+        g_discovery_thread_should_run = FALSE; // Signal the thread to exit if it's still running and checking this flag.
+        // The authoritative wait and handle close will be in DriverUnload.
+        // No KeWaitForSingleObject or ObDereferenceObject here for discovery_thread_object_ref.
+        debug_print("[+] PrepareForUnload: Signaled DiscoveryAndAttachmentThread to stop (if running).\n");
     }
 
     // Stop Polling Work Item
@@ -490,18 +471,28 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     KeAcquireSpinLock(&g_comm_lock, &oldIrql);
     if (g_target_process != NULL) { // g_target_process is set in HandshakeDeviceControl (IoGetCurrentProcess())
         target_eprocess_handshake = g_target_process;
-        ObReferenceObject(target_eprocess_handshake);
+        // ObReferenceObject(target_eprocess_handshake); // DO NOT take another reference. target_eprocess_handshake now "holds" the ref from HandshakeDeviceControl.
     }
     KeReleaseSpinLock(&g_comm_lock, oldIrql);
 
     if (!target_eprocess_handshake) {
-        debug_print("[-] DiscoveryAndAttachmentThread: target_eprocess_handshake is NULL after handshake. Aborting.\n");
+        debug_print("[-] DiscoveryAndAttachmentThread: target_eprocess_handshake is NULL (g_target_process was NULL). Aborting.\n");
+        // No object to dereference here as target_eprocess_handshake was never assigned a referenced object.
         PsTerminateSystemThread(STATUS_INVALID_DEVICE_STATE);
         return;
     }
+    // At this point, target_eprocess_handshake holds a reference to the process.
 
     if (g_obfuscated_ptr1_um_addr_via_handshake == NULL) {
         debug_print("[-] DiscoveryAndAttachmentThread: g_obfuscated_ptr1_um_addr_via_handshake is NULL. Aborting.\n");
+        // target_eprocess_handshake is valid and referenced, clean it up.
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+        if (g_target_process == target_eprocess_handshake) { // Ensure it's the same process we are about to deref
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(STATUS_INVALID_PARAMETER);
         return;
@@ -509,6 +500,14 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
 
     if (g_received_um_verification_token == 0) {
         debug_print("[-] DiscoveryAndAttachmentThread: Handshake completed but g_received_um_verification_token is zero. Aborting setup.\n");
+        // target_eprocess_handshake is valid and referenced, clean it up.
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(STATUS_INVALID_PARAMETER);
         return;
@@ -523,9 +522,17 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     status = FetchDynamicSignaturesFromProcess(target_eprocess_handshake);
     if (!NT_SUCCESS(status)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to fetch dynamic signatures. Status: 0x%X\n", status);
+        KIRQL oldIrql_fail; // Declare oldIrql for this scope
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) { // Check if it's still our target
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: Fetched dynamic signatures successfully.\n");
     debug_print("    g_km_dynamic_head_signature: 0x%llX\n", g_km_dynamic_head_signature);
@@ -542,17 +549,33 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
 
     if (!NT_SUCCESS(status_read) || bytes_read_ps1 != sizeof(PtrStruct1_KM)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to read PtrStruct1_KM. Status: 0x%X, BytesRead: %zu\n", status_read, bytes_read_ps1);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status_read);
-        return;
+        return; // Should be unreachable
     }
     // Now verify PtrStruct1 head signature using the g_km_dynamic_head_signature loaded by FetchDynamicSignaturesFromProcess
     if (km_ptr_struct1_copy.head_signature != g_km_dynamic_head_signature) {
         debug_print("[-] DiscoveryAndAttachmentThread: PtrStruct1 head_signature mismatch. Read: 0x%llX, Expected: 0x%llX.\n",
                     km_ptr_struct1_copy.head_signature, g_km_dynamic_head_signature);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(STATUS_INVALID_SIGNATURE);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: Read and VERIFIED PtrStruct1_KM. head_signature: 0x%llX\n", km_ptr_struct1_copy.head_signature);
 
@@ -566,9 +589,17 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     status_read = SafeReadUmMemory(target_eprocess_handshake, ptr_struct2_um_va, &km_ptr_struct2_copy, sizeof(PtrStruct2_KM), &bytes_read_ps2);
     if (!NT_SUCCESS(status_read) || bytes_read_ps2 != sizeof(PtrStruct2_KM)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to read PtrStruct2_KM. Status: 0x%X\n", status_read);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status_read);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: Read PtrStruct2_KM.\n");
 
@@ -581,9 +612,17 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     status_read = SafeReadUmMemory(target_eprocess_handshake, ptr_struct3_um_va, &km_ptr_struct3_copy, sizeof(PtrStruct3_KM), &bytes_read_ps3);
     if (!NT_SUCCESS(status_read) || bytes_read_ps3 != sizeof(PtrStruct3_KM)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to read PtrStruct3_KM. Status: 0x%X\n", status_read);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status_read);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: Read PtrStruct3_KM.\n");
 
@@ -596,9 +635,17 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     status_read = SafeReadUmMemory(target_eprocess_handshake, ptr_struct4_um_va, &km_ptr_struct4_copy, sizeof(PtrStruct4_KM), &bytes_read_ps4);
     if (!NT_SUCCESS(status_read) || bytes_read_ps4 != sizeof(PtrStruct4_KM)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to read PtrStruct4_KM. Status: 0x%X\n", status_read);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status_read);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: Read PtrStruct4_KM.\n");
 
@@ -608,9 +655,17 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
 
     if (!shared_comm_block_ptr_candidate) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to deobfuscate SharedCommBlock address (NULL).\n");
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(STATUS_INVALID_ADDRESS);
-        return;
+        return; // Should be unreachable
     }
 
     // --- Stage 3: Final Verification of SharedCommBlock signature ---
@@ -623,17 +678,33 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
 
     if (!NT_SUCCESS(status_read) || bytes_read_final_sig != sizeof(UINT64)) {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to read signature from candidate SharedCommBlock. Status: 0x%X\n", status_read);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(status_read);
-        return;
+        return; // Should be unreachable
     }
 
     if (final_shared_block_sig_check != g_km_dynamic_shared_comm_block_signature) {
         debug_print("[-] DiscoveryAndAttachmentThread: SharedCommBlock signature mismatch. Expected 0x%llX, Got 0x%llX.\n",
                     g_km_dynamic_shared_comm_block_signature, final_shared_block_sig_check);
+        KIRQL oldIrql_fail;
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_fail);
+        if (g_target_process == target_eprocess_handshake) {
+            g_target_process = NULL;
+            g_km_thread_should_run = FALSE;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_fail);
         ObDereferenceObject(target_eprocess_handshake);
         PsTerminateSystemThread(STATUS_INVALID_SIGNATURE);
-        return;
+        return; // Should be unreachable
     }
     debug_print("[+] DiscoveryAndAttachmentThread: SharedCommBlock signature VERIFIED.\n");
 
@@ -656,13 +727,26 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
         debug_print("[+] DiscoveryAndAttachmentThread: Polling work item queued.\n");
     } else {
         debug_print("[-] DiscoveryAndAttachmentThread: Failed to allocate polling work item. Polling will not start.\n");
+        // g_km_thread_should_run = FALSE; // Already set within this lock
+        // g_um_shared_comm_block_ptr = NULL; // Already set within this lock
+        // ObDereferenceObject(g_target_process); // This is target_eprocess_handshake
+        // g_target_process = NULL; // Already set to NULL within this lock
+        // The lock is already held here. We need to release target_eprocess_handshake after releasing the lock.
+        // The global g_target_process is already NULL.
+        PEPROCESS temp_proc_to_deref = target_eprocess_handshake; // Save for deref after lock release
+        g_target_process = NULL; // Ensure it's NULL under lock
         g_km_thread_should_run = FALSE;
         g_um_shared_comm_block_ptr = NULL;
-        ObDereferenceObject(g_target_process);
-        g_target_process = NULL;
+        KeReleaseSpinLock(&g_comm_lock, oldIrql); // Release lock before dereferencing and terminating
+
+        ObDereferenceObject(temp_proc_to_deref); // Dereference the object
+        PsTerminateSystemThread(STATUS_INSUFFICIENT_RESOURCES); // Terminate thread
+        return; // Should be unreachable
     }
     KeReleaseSpinLock(&g_comm_lock, oldIrql);
 
+    // If we reach here, setup was successful, and target_eprocess_handshake's reference is now "owned" by g_target_process.
+    // No need to dereference target_eprocess_handshake locally in this success path.
     debug_print("[+] DiscoveryAndAttachmentThread: Setup successful. Thread will exit (polling is now independent).\n");
 }
 

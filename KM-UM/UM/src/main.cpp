@@ -71,6 +71,14 @@ static DWORD get_process_id(const wchar_t* process_name) {
 // Removed AOBScan_local
 
 int main() {
+    // Add this block
+    std::cout << "*******************************************************************" << std::endl;
+    std::cout << "* WARNING: This command-line application is DEPRECATED.           *" << std::endl;
+    std::cout << "* Its functionality is superseded by the ImGui application found  *" << std::endl;
+    std::cout << "* in the 'ResponsibleImGui/Source/ImGui Standalone' directory.    *" << std::endl;
+    std::cout << "* This tool is kept for reference or specific testing only.       *" << std::endl;
+    std::cout << "*******************************************************************" << std::endl << std::endl;
+
     const DWORD pid_dw = get_process_id(L"destiny2.exe"); // Example process
     uint64_t pid = static_cast<uint64_t>(pid_dw);
 

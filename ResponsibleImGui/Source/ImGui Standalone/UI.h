@@ -21,6 +21,7 @@ private:
 
 public:
 	static HMODULE hCurrentModule;
+	static std::atomic<bool> bExitThread; // Added for graceful thread exit
 
 	static void Render();
 
