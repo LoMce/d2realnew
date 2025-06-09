@@ -26,30 +26,46 @@
 using json = nlohmann::json;
 
 // Global state
+// Holds the enabled/disabled state of various features, typically loaded from a configuration file.
 inline std::unordered_map<std::string, bool> FeatureConfig;
+// Stores the virtual key codes for hotkeys associated with features.
 inline std::unordered_map<std::string, int> Hotkeys;
+// Flag indicating whether the initial AOB (Array of Bytes) scan for all features has completed.
 inline std::atomic<bool> g_aob_scan_complete_flag{false};
+// Flag indicating if an AOB scan is currently in progress.
 inline std::atomic<bool> g_aob_scan_running{false};
 
 // Forward declarations for helper functions
+// Loads hotkey configurations from a JSON file.
 void LoadHotkeys();
+// Saves the current hotkey configurations to a JSON file.
 void SaveHotkeys();
+// Sets a default hotkey if one isn't already defined.
 void SetHotkeyDefault(const std::string& name, int defaultVK);
+// Converts a virtual key code to its string representation.
 std::string GetKeyName(int vkCode);
+// Renders an ImGui widget for picking a hotkey.
 bool DrawHotkeyPicker(const std::string& name, const std::string& label, bool& listening);
+// Converts a string of hexadecimal characters into a vector of bytes.
 std::vector<BYTE> HexToBytes(const std::string& hex_str);
 
-// Modified InjectCodecave to use NTSTATUS and atomic<uintptr_t>
-inline bool InjectCodecave( // Return bool for simplicity in feature logic, but use NTSTATUS internally
+// Injects shellcode into a target process at a specified address, creating a codecave.
+// Returns true on success, false on failure.
+// pid: Process ID of the target process.
+// targetAddress: The address in the target process where the hook (JMP to codecave) will be placed.
+// shellcodeBytes: The actual shellcode to be written into the codecave.
+// originalSize: The number of original bytes at targetAddress that will be overwritten by the JMP instruction.
+// codecaveAddress_atomic: An atomic variable that will store the address of the allocated codecave. If it's 0, memory is allocated; otherwise, the existing address is used.
+inline bool InjectCodecave(
     DWORD pid,
     uintptr_t targetAddress,
     const std::vector<BYTE>& shellcodeBytes,
     SIZE_T originalSize,
-    std::atomic<uintptr_t>& codecaveAddress_atomic) // Takes atomic by reference
+    std::atomic<uintptr_t>& codecaveAddress_atomic)
 {
     if (shellcodeBytes.empty()) {
         LogMessage("[-] InjectCodecave: Shellcode byte vector is empty.");
-        return false; // Changed from FALSE
+        return false;
     }
     if (shellcodeBytes.size() < 5 && originalSize > 0) { // Need 5 bytes for a JMP
         LogMessage("[-] InjectCodecave: Shellcode must be at least 5 bytes for a JMP if originalSize > 0.");
@@ -110,10 +126,13 @@ inline bool InjectCodecave( // Return bool for simplicity in feature logic, but 
         std::cout << "[+] InjectCodecave: Hook (JMP to cave) written to 0x" << std::hex << targetAddress << std::dec << " for PID " << pid << std::endl;
         #endif
     }
-    return true; // Changed from TRUE
+    return true;
 }
 
-// Function to release a codecave
+// Releases memory previously allocated for a codecave.
+// pid: Process ID of the target process where the memory was allocated.
+// featureCodecaveAddress: Atomic variable holding the address of the codecave to be freed.
+// memAllocatedFlag: Boolean flag indicating if this specific feature instance was responsible for the allocation.
 static inline void ReleaseCodecave(DWORD pid, std::atomic<uintptr_t>& featureCodecaveAddress, bool& memAllocatedFlag) {
     uintptr_t address_to_free = featureCodecaveAddress.load();
     if (address_to_free != 0 && memAllocatedFlag) {
@@ -144,48 +163,384 @@ inline bool DrawHotkeyPicker(const std::string& name, const std::string& label, 
 inline std::vector<BYTE> HexToBytes(const std::string& hex_str) { std::vector<BYTE> bytes; std::string hex = hex_str; hex.erase(std::remove_if(hex.begin(), hex.end(), ::isspace), hex.end()); if (hex.length() % 2 != 0) {LogMessage("[-] HexToBytes: Odd length hex string."); return bytes; } if (hex.empty()){ return bytes; } for (size_t i = 0; i < hex.length(); i += 2) { std::string byteString = hex.substr(i, 2); try { BYTE byte = static_cast<BYTE>(std::stoul(byteString, nullptr, 16)); bytes.push_back(byte); } catch (const std::exception& e) {LogMessageF("[-] HexToBytes: Error parsing '%s': %s", byteString.c_str(), e.what()); bytes.clear(); return bytes; } } return bytes; }
 
 // Feature Namespaces
-namespace Killaura { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 0F 10 41 20 32 C0 0F C6 C0 ? 0F 11 02 C3 ? 0F ? ? ? 32"; std::string shellcode_hex = "c7 41 20 00 00 7a 44 f3 0f 10 41 20 e9 00 00 00 00"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace LocalPlayer { struct Vec3 { float x, y, z; }; std::atomic<Vec3> g_cachedCoords{ {0,0,0} }; bool Enabled = false; bool flyEnabled = false; bool FlyHotkeyWasDown = false; inline bool KillKeyEnabled = false; inline bool KillKeyWasDown = false; uintptr_t destinyBase = 0x301F8F0; std::atomic<uintptr_t> realPlayer = 0; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::atomic<uintptr_t> addrMemAllocatedAddress{0}; bool addr_mem_allocated = false; std::string AOB = "0F 10 89 ? ? ? ? 0F 54 0D ? ? ? ? 66 0F 6F ? ? ? ? ? 0F 54 C8 66 0F 72 D2 ? 66 0F 72 F2 ? 0F 55 C2 0F 56 C8 0F 11 0A E9 ? ? ? ? 48 81 C1"; std::string shellcode_hex = "50 48 89 C8 48 A3 FF FF FF FF FF FF FF FF 58 0F 10 89 C0 01 00 00 E9 00 00 00 00"; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0}; std::atomic<uintptr_t> disableGravAddress{0}; std::string disableGravAOB = "88 51 79 8B D0"; std::string disableGravShellcode_hex = "C7 41 79 01 00 00 00 8B D0 E9 00 00 00 00"; BYTE disableGravOrigBytes[5] = {}; std::atomic<uintptr_t> disableGravMemAllocatedAddress{0}; bool disableGrav_mem_allocated = false; }
-namespace ViewAngles { struct Vec2 { float pitch, yaw; }; std::atomic<uintptr_t> g_viewBase{0}; std::atomic<ViewAngles::Vec2> g_cachedAngles{{0.0f,0.0f}}; std::atomic<bool> g_cacheThreadRunning{false}; bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::atomic<uintptr_t> addrMemAllocatedAddress{0}; bool addr_mem_allocated = false; std::string AOB = "F3 0F 11 47 1C 7A"; std::string shellcode_hex = "50 48 89 F8 48 A3 FF FF FF FF FF FF FF FF 58 F3 0F 11 47 1C E9 00 00 00 00"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0}; inline void CacheLoop(DWORD pid) { g_cacheThreadRunning = true; uintptr_t temp_addr_storage_val = 0; Vec2 angles_val_cache; LocalPlayer::Vec3 coords_val_cache; while (g_cacheThreadRunning.load()) { if (addrMemAllocatedAddress.load() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue; }  NTSTATUS status = DriverComm::read_memory<uintptr_t>(addrMemAllocatedAddress.load(), temp_addr_storage_val); if (NT_SUCCESS(status)) { g_viewBase.store(temp_addr_storage_val); if (temp_addr_storage_val != 0) {  NTSTATUS angle_status = DriverComm::read_memory<Vec2>(temp_addr_storage_val + 0x18, angles_val_cache); if(NT_SUCCESS(angle_status)) g_cachedAngles.store(angles_val_cache); } } if (LocalPlayer::realPlayer.load() != 0) {  NTSTATUS coord_status = DriverComm::read_memory<LocalPlayer::Vec3>(LocalPlayer::realPlayer.load() + 0x1C0, coords_val_cache); if(NT_SUCCESS(coord_status)) LocalPlayer::g_cachedCoords.store(coords_val_cache); } std::this_thread::sleep_for(std::chrono::milliseconds(150)); } } }
-namespace Ghostmode { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 0F 11 4C 24 38 B9 DD AD 93 43 8B 5C 24 38 B8 9C 6E 3F 2B 66 66 0F 1F 84 00 00 00 00 00"; BYTE origBytes[6] = {}; std::string shellcode_hex = "b8 00 00 80 bf 66 0f 6e c8 f3 0f 11 4c 24 38 e9 00 00 00 00"; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace Godmode { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "33 DA C1 C3 10 E8 ? ? ? ? 48"; std::string shellcode_hex = "6b db 01 e9 00 00 00 00"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfAmmo { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "44 0F 28 BD F0 05 00 00 48 83 C3"; std::string shellcode_hex = "81 bd f0 05 00 00 00 00 80 bf 0f 85 00 00 00 00 c7 85 f0 05 00 00 00 00 00 00 44 0f 28 bd f0 05 00 00 e9 00 00 00 00"; BYTE origBytes[8] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace dmgMult { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 44 0F 10 61 24 44 0F 29 68 88 F3 44 0F 10 69 1C"; std::string shellcode_hex = "c7 41 24 00 40 9c 45 f3 44 0f 10 61 24 e9 00 00 00 00"; BYTE origBytes[6] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace FOV { std::string AOB = "30 00 00 00 00 00 00 00 28 C8 0A 00 00 00 00 00 40 01 00 00 00 00 00 00 A0 08"; uint8_t fov = 0; std::atomic<uintptr_t> ptr{0}; uintptr_t offset = 0x530; uintptr_t pointer = 0x5DC;}
-namespace RPM { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 0F 11 86 CC 17 00 00 48"; std::string shellcode_hex = "f3 0f 10 86 9c 17 00 00 f3 0f 59 c0 f3 0f 11 86 9c 17 00 00 f3 0f 11 86 cc 17 00 00 e9 00 00 00 00"; BYTE origBytes[8] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace NoRecoil { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "0F 11 8B ? ? ? ? 0F 28 CD";  std::string shellcode_hex = "66 0f ef c9 0f 11 8b 50 10 00 00 e9 00 00 00 00"; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace OHK { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 0F 11 44 24 50 33 C0 8B";  std::string shellcode_hex = "0f ef c0 f3 0f 11 44 24 32 e9 00 00 00 00"; BYTE origBytes[6] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace NoJoinAllies { bool Enabled = false; std::string AOB = "48 01 47 ? EB ? 48"; BYTE nops[6] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[6] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace NoTurnBack { bool Enabled = false; std::string AOB = "F3 0F 11 46 ? E9 ? ? ? ? 44 0F B6"; BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfSwordAmmo {  bool Enabled = false; std::string AOB = "0F 28 C7 F3 41 0F 5C C0 0F 2F C6 ? ? 41 0F 28 F8 F3"; BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[8] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace SparrowAnywhere {  bool Enabled = false; std::string AOB = "74 ?? 48 8B C8 48 89 7C 24 30 E8 ?? ?? ?? ?? 48 8B CB 48 8B F8 E8 ?? ?? ?? ?? 48 8B D8 48 85 C0 ?? ?? 80 78 0E 00"; BYTE mybyte[] = { 0x75 }; BYTE origByte[] = { 0x74 }; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfStacks {bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "89 5F ? 74 ? 8B"; std::string shellcode_hex = "bb 64 00 00 00 89 5f 30 e9 00 00 00 00"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace NoRezTokens {  bool Enabled = false; std::string AOB = "75 08 E8 ?? ?? ?? ?? 89"; BYTE myByte[] = { 0xEB }; BYTE origByte[] = { 0x75 }; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InstaRespawn {  bool Enabled = false; std::string AOB = "49 8B ? ? ? ? ? 48 8B 08 48 3B"; BYTE myBytes[] = { 0x48, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace RespawnAnywhere { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "48 89 ? ? ? ? ? ? ? 0F 28 CE 48 8D"; std::string shellcode_hex = "50 48 31 c0 48 89 86 68 08 00 00 58 e9 00 00 00 00"; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace ShootThru {  bool Enabled = false; std::string AOB = "0F 11 02 0F 11 4A 10 44 0F 28 0D"; BYTE nops[] = { 0x90, 0x90, 0x90 }; BYTE origBytes[3] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace Chams { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "0F 10 02 48 83 C1 60"; std::string shellcode_hex = "b8 a6 95 80 80 39 42 78 0f 85 06 00 00 00 c7 02 00 00 20 41 0f 10 02 48 83 c1 60 e9 00 00 00 00"; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace ImmuneBosses { std::atomic<bool> Enabled = false; std::atomic<bool> ThreadRunning = false; std::atomic<uintptr_t> Address{0}; }
-namespace AbilityCharge { bool Enabled = false; bool WasKeyDown = false; static bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0};  std::string AOB = "0F 10 02 48 83 C1 60"; std::vector<BYTE> shellcode = HexToBytes("50 b8 00 00 80 3f f3 0f 2a c0 48 83 c1 60 58 e9 00 00 00 00"); BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace ImmuneAura {  bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "0F 10 02 48 83 C1 60"; std::string shellcode_hex = "50 b8 e8 03 00 00 f3 0f 2a c0 48 83 c1 60 58 e9 00 00 00 00"; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace IcarusDash {  bool Enabled = false; std::string AOB = "89 46 34 89 6E 3C"; BYTE nops[] = { 0x90, 0x90, 0x90 }; BYTE origBytes[3] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InstantInteract { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::string AOB = "F3 0F 11 43 08 48 83 C4 30 5B C3 48"; std::string shellcode_hex = "c7 43 08 00 00 00 00 e9 00 00 00 00"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InteractThruWalls { bool Enabled = false; bool mem_allocated1 = false; bool mem_allocated2 = false; std::atomic<uintptr_t> memAllocatedAddress1{0}; std::atomic<uintptr_t> memAllocatedAddress2{0}; std::string AOB1 = "8B 54 01 6C 8B 4F 24"; std::string AOB2 = "0F 11 02 0F 11 4A 10 44 0F 28 0D"; std::string shellcode1_hex = "c7 44 01 6c 00 00 7a 44 8b 54 01 6c 8b 4f 24 e9 00 00 00 00"; std::string shellcode2_hex = "c7 02 10 27 00 00 0f 11 4a 10 e9 00 00 00 00"; BYTE origBytes1[7] = {}; BYTE origBytes2[7] = {}; std::atomic<uintptr_t> InstructionAddress1{0}; std::atomic<uintptr_t> InstructionAddress2{0};}
-namespace GameSpeed {  bool Enabled = false; std::string AOB = "00 5B 24 49 00 24 74 49 0A D7 23 3C 0A D7 23 3C 0A D7 23 3C 0A D7 23 3C 00 00 00 00 00 00 00 00 00 00 00"; std::atomic<uintptr_t> Address{0}; float FastValue = 9000.0f; float NormalValue = 673200.0f; bool WasKeyDown = false;}
-namespace LobbyCrasher {  bool Enabled = false; std::string AOB = "C7 43 04 FF FF FF FF C6 03 01 48 83 C4 20 5B C3 48 8B"; BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace GSize {  bool Enabled = false;  std::string AOB = "00 00 80 3F 80 F0 FA 02"; float Value = 0.0f; float inputVal = 0; std::atomic<uintptr_t> Address{0}; }
-namespace Oxygen {  bool Enabled = false; std::string AOB = "0F 28 C8 E8 ? ? ? ? 0F B6 43 0C"; BYTE nops[] = { 0x90 ,0x90, 0x90 }; BYTE origBytes[3] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfSparrowBoost {  bool Enabled = false; std::string AOB = "72 34 48 8D 4B 50"; BYTE myByte[] = { 0x77 }; BYTE origByte[] = { 0x72 }; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfBuffTimers {  bool Enabled = false; std::string AOB = "48 89 8B A0 00 00 00 48 8D 4C 24 30 E8 ? ? ? ? 48 8B 08 48 39"; BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes[7] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace InfExoticBuffTimers {  bool Enabled = false; std::string AOB = "F3 0F 5C C7 F3 0F 5F C6 0F 2E"; BYTE nops[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90}; BYTE origBytes[8] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace AntiFlinch {  bool Enabled = false;  std::string AOB1 = "F3 0F 11 8B E0 16 00 00"; std::string AOB2 = "F3 0F 11 8B E4 16 00 00"; std::string AOB3 = "F3 0F 11 83 E8 16 00 00"; BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; BYTE origBytes1[8] = {}; BYTE origBytes2[8] = {}; BYTE origBytes3[8] = {}; std::atomic<uintptr_t> InstructionAddress1{0}; std::atomic<uintptr_t> InstructionAddress2{0}; std::atomic<uintptr_t> InstructionAddress3{0};}
-// ActivityLoader: New shellcode intends to mov RDX into the address pointed to by addrMemAllocatedAddress, then executes original instruction.
-// mov rax, <addrMemAllocatedAddress_value> ; mov [rax], rdx ; movzx r9d, word ptr [rdx+2] (original instruction)
-namespace ActivityLoader { bool Enabled = false; bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0}; std::atomic<uintptr_t> addrMemAllocatedAddress{0}; bool addr_mem_allocated = false; std::string AOB = "44 0F B7 4A 02 44"; std::string shellcode_hex = "48 B8 00 00 00 00 00 00 00 00 48 89 10 44 0F B7 4A 02"; BYTE origBytes[5] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
-namespace Mag999 { bool Enabled = false;  bool mem_allocated = false; std::atomic<uintptr_t> memAllocatedAddress{0};  std::string AOB = "0F 10 04 C1 48 83 C2 10 49"; std::string shellcode_hex = "50 B8 8A 49 FD 79 66 0F 6E D0 58 F3 0F 10 44 C1 B8 0F 2E C2 0F 85 16 00 00 00 50 B8 20 BC BE 4C 66 0F 6E D0 58 F3 0F 11 14 C1 F3 0F 11 54 C1 50 50 B8 02 03 02 34 66 0F 6E D0 58 F3 0F 10 44 C1 B8 0F 2E C2 0F 85 16 00 00 00 50 B8 20 BC BE 4C 66 0F 6E D0 58 F3 0F 11 14 C1 F3 0F 11 54 C1 10 0F 10 04 C1 48 83 C2 10 E9 00 00 00 00"; BYTE origBytes[8] = {}; std::atomic<uintptr_t> InstructionAddress{0};}
+// Killaura: Automatically attacks nearby enemies.
+namespace Killaura {
+    bool Enabled = false; // Tracks if the feature is currently active.
+    bool mem_allocated = false; // True if a codecave was allocated specifically for this feature.
+    std::atomic<uintptr_t> memAllocatedAddress{0}; // Stores the address of the allocated codecave.
+    std::string AOB = "F3 0F 10 41 20 32 C0 0F C6 C0 ? 0F 11 02 C3 ? 0F ? ? ? 32"; // Array of Bytes pattern for locating the instruction to hook.
+    std::string shellcode_hex = "c7 41 20 00 00 7a 44 f3 0f 10 41 20 e9 00 00 00 00"; // Hex string representation of the shellcode to be injected.
+    BYTE origBytes[5] = {}; // Buffer to store the original bytes at the hook location.
+    std::atomic<uintptr_t> InstructionAddress{0}; // Stores the resolved address of the instruction to hook.
+}
+// LocalPlayer: Manages local player data and related functionalities like Fly.
+namespace LocalPlayer {
+    struct Vec3 { float x, y, z; };
+    std::atomic<Vec3> g_cachedCoords{ {0,0,0} }; // Cached coordinates of the local player.
+    bool Enabled = false; // Main toggle for LocalPlayer related hooks (coordinates, view angles).
+    bool flyEnabled = false; // Specific toggle for the fly feature.
+    bool FlyHotkeyWasDown = false; // Tracks previous state of the fly hotkey.
+    inline bool KillKeyEnabled = false; // Toggle for the suicide key feature.
+    inline bool KillKeyWasDown = false; // Tracks previous state of the suicide hotkey.
+    uintptr_t destinyBase = 0x301F8F0; // Base offset, potentially for player data structure.
+    std::atomic<uintptr_t> realPlayer = 0; // Stores the runtime address of the local player object.
+    bool mem_allocated = false; // Flag for the main LocalPlayer hook codecave.
+    std::atomic<uintptr_t> memAllocatedAddress{0}; // Address of the main LocalPlayer hook codecave.
+    std::atomic<uintptr_t> addrMemAllocatedAddress{0}; // Address of allocated memory to store the realPlayer pointer.
+    bool addr_mem_allocated = false; // Flag for addrMemAllocatedAddress allocation.
+    std::string AOB = "0F 10 89 ? ? ? ? 0F 54 0D ? ? ? ? 66 0F 6F ? ? ? ? ? 0F 54 C8 66 0F 72 D2 ? 66 0F 72 F2 ? 0F 55 C2 0F 56 C8 0F 11 0A E9 ? ? ? ? 48 81 C1"; // AOB for main LocalPlayer hook.
+    std::string shellcode_hex = "50 48 89 C8 48 A3 FF FF FF FF FF FF FF FF 58 0F 10 89 C0 01 00 00 E9 00 00 00 00"; // Shellcode for main LocalPlayer hook.
+    BYTE origBytes[7] = {}; // Original bytes for main LocalPlayer hook.
+    std::atomic<uintptr_t> InstructionAddress{0}; // Address for main LocalPlayer hook.
+    std::atomic<uintptr_t> disableGravAddress{0}; // Address for gravity disabling hook.
+    std::string disableGravAOB = "88 51 79 8B D0"; // AOB for gravity disabling.
+    std::string disableGravShellcode_hex = "C7 41 79 01 00 00 00 8B D0 E9 00 00 00 00"; // Shellcode for gravity disabling.
+    BYTE disableGravOrigBytes[5] = {}; // Original bytes for gravity disabling hook.
+    std::atomic<uintptr_t> disableGravMemAllocatedAddress{0}; // Codecave for gravity disabling.
+    bool disableGrav_mem_allocated = false; // Flag for gravity disabling codecave.
+}
+// ViewAngles: Manages player view angles.
+namespace ViewAngles {
+    struct Vec2 { float pitch, yaw; };
+    std::atomic<uintptr_t> g_viewBase{0}; // Base address for view angles.
+    std::atomic<ViewAngles::Vec2> g_cachedAngles{{0.0f,0.0f}}; // Cached view angles.
+    std::atomic<bool> g_cacheThreadRunning{false}; // Flag to control the angle caching thread.
+    bool Enabled = false; // Usually tied to LocalPlayer::Enabled.
+    bool mem_allocated = false; // Flag for ViewAngles hook codecave.
+    std::atomic<uintptr_t> memAllocatedAddress{0}; // Address of ViewAngles hook codecave.
+    std::atomic<uintptr_t> addrMemAllocatedAddress{0}; // Address of allocated memory to store the view angle base pointer.
+    bool addr_mem_allocated = false; // Flag for addrMemAllocatedAddress allocation.
+    std::string AOB = "F3 0F 11 47 1C 7A"; // AOB for ViewAngles hook.
+    std::string shellcode_hex = "50 48 89 F8 48 A3 FF FF FF FF FF FF FF FF 58 F3 0F 11 47 1C E9 00 00 00 00"; // Shellcode for ViewAngles hook.
+    BYTE origBytes[5] = {}; // Original bytes for ViewAngles hook.
+    std::atomic<uintptr_t> InstructionAddress{0}; // Address for ViewAngles hook.
+    inline void CacheLoop(DWORD pid) { g_cacheThreadRunning = true; uintptr_t temp_addr_storage_val = 0; Vec2 angles_val_cache; LocalPlayer::Vec3 coords_val_cache; while (g_cacheThreadRunning.load()) { if (addrMemAllocatedAddress.load() == 0) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue; }  NTSTATUS status = DriverComm::read_memory<uintptr_t>(addrMemAllocatedAddress.load(), temp_addr_storage_val); if (NT_SUCCESS(status)) { g_viewBase.store(temp_addr_storage_val); if (temp_addr_storage_val != 0) {  NTSTATUS angle_status = DriverComm::read_memory<Vec2>(temp_addr_storage_val + 0x18, angles_val_cache); if(NT_SUCCESS(angle_status)) g_cachedAngles.store(angles_val_cache); } } if (LocalPlayer::realPlayer.load() != 0) {  NTSTATUS coord_status = DriverComm::read_memory<LocalPlayer::Vec3>(LocalPlayer::realPlayer.load() + 0x1C0, coords_val_cache); if(NT_SUCCESS(coord_status)) LocalPlayer::g_cachedCoords.store(coords_val_cache); } std::this_thread::sleep_for(std::chrono::milliseconds(150)); } }
+}
+// Ghostmode: Makes the player invisible or intangible to enemies.
+namespace Ghostmode {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "F3 0F 11 4C 24 38 B9 DD AD 93 43 8B 5C 24 38 B8 9C 6E 3F 2B 66 66 0F 1F 84 00 00 00 00 00";
+    BYTE origBytes[6] = {};
+    std::string shellcode_hex = "b8 00 00 80 bf 66 0f 6e c8 f3 0f 11 4c 24 38 e9 00 00 00 00";
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// Godmode: Makes the player invulnerable to damage.
+namespace Godmode {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "33 DA C1 C3 10 E8 ? ? ? ? 48";
+    std::string shellcode_hex = "6b db 01 e9 00 00 00 00";
+    BYTE origBytes[5] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfAmmo: Provides infinite ammunition for weapons.
+namespace InfAmmo {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "44 0F 28 BD F0 05 00 00 48 83 C3";
+    std::string shellcode_hex = "81 bd f0 05 00 00 00 00 80 bf 0f 85 00 00 00 00 c7 85 f0 05 00 00 00 00 00 00 44 0f 28 bd f0 05 00 00 e9 00 00 00 00";
+    BYTE origBytes[8] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// dmgMult: Multiplies outgoing damage.
+namespace dmgMult {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "F3 44 0F 10 61 24 44 0F 29 68 88 F3 44 0F 10 69 1C";
+    std::string shellcode_hex = "c7 41 24 00 40 9c 45 f3 44 0f 10 61 24 e9 00 00 00 00";
+    BYTE origBytes[6] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// FOV: Modifies the player's field of view.
+namespace FOV {
+    std::string AOB = "30 00 00 00 00 00 00 00 28 C8 0A 00 00 00 00 00 40 01 00 00 00 00 00 00 A0 08";
+    uint8_t fov = 0; // Current FOV value.
+    std::atomic<uintptr_t> ptr{0}; // Pointer to the FOV value in memory.
+    uintptr_t offset = 0x530;
+    uintptr_t pointer = 0x5DC;
+}
+// RPM: Modifies weapon rate of fire (Rapid Fire).
+namespace RPM {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "F3 0F 11 86 CC 17 00 00 48";
+    std::string shellcode_hex = "f3 0f 10 86 9c 17 00 00 f3 0f 59 c0 f3 0f 11 86 9c 17 00 00 f3 0f 11 86 cc 17 00 00 e9 00 00 00 00";
+    BYTE origBytes[8] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// NoRecoil: Removes weapon recoil.
+namespace NoRecoil {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "0F 11 8B ? ? ? ? 0F 28 CD";
+    std::string shellcode_hex = "66 0f ef c9 0f 11 8b 50 10 00 00 e9 00 00 00 00";
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// OHK: One-Hit Kill.
+namespace OHK {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "F3 0F 11 44 24 50 33 C0 8B";
+    std::string shellcode_hex = "0f ef c0 f3 0f 11 44 24 32 e9 00 00 00 00";
+    BYTE origBytes[6] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// NoJoinAllies: Prevents the "Joining Allies" teleport mechanic.
+namespace NoJoinAllies {
+    bool Enabled = false;
+    std::string AOB = "48 01 47 ? EB ? 48";
+    BYTE nops[6] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 }; // NOP bytes to disable the instruction.
+    BYTE origBytes[6] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// NoTurnBack: Disables "Turn Back" zones/barriers.
+namespace NoTurnBack {
+    bool Enabled = false;
+    std::string AOB = "F3 0F 11 46 ? E9 ? ? ? ? 44 0F B6";
+    BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes[5] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfSwordAmmo: Infinite ammunition for swords.
+namespace InfSwordAmmo {
+    bool Enabled = false; // Often tied to InfAmmo::Enabled.
+    std::string AOB = "0F 28 C7 F3 41 0F 5C C0 0F 2F C6 ? ? 41 0F 28 F8 F3";
+    BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes[8] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// SparrowAnywhere: Allows summoning Sparrow vehicle in restricted areas.
+namespace SparrowAnywhere {
+    bool Enabled = false;
+    std::string AOB = "74 ?? 48 8B C8 48 89 7C 24 30 E8 ?? ?? ?? ?? 48 8B CB 48 8B F8 E8 ?? ?? ?? ?? 48 8B D8 48 85 C0 ?? ?? 80 78 0E 00";
+    BYTE mybyte[] = { 0x75 }; // Patched byte.
+    BYTE origByte[] = { 0x74 }; // Original byte.
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfStacks: Infinite stacks for stackable items/buffs.
+namespace InfStacks {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "89 5F ? 74 ? 8B";
+    std::string shellcode_hex = "bb 64 00 00 00 89 5f 30 e9 00 00 00 00";
+    BYTE origBytes[5] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// NoRezTokens: Removes the need for resurrection tokens.
+namespace NoRezTokens {
+    bool Enabled = false;
+    std::string AOB = "75 08 E8 ?? ?? ?? ?? 89";
+    BYTE myByte[] = { 0xEB };
+    BYTE origByte[] = { 0x75 };
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InstaRespawn: Allows instant respawning.
+namespace InstaRespawn {
+    bool Enabled = false;
+    std::string AOB = "49 8B ? ? ? ? ? 48 8B 08 48 3B";
+    BYTE myBytes[] = { 0x48, 0x31, 0xD2, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// RespawnAnywhere: Allows respawning at any location (often combined with InstaRespawn).
+namespace RespawnAnywhere {
+    bool Enabled = false; // Often tied to InstaRespawn::Enabled.
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "48 89 ? ? ? ? ? ? ? 0F 28 CE 48 8D";
+    std::string shellcode_hex = "50 48 31 c0 48 89 86 68 08 00 00 58 e9 00 00 00 00";
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// ShootThru: Allows bullets to pass through walls/objects.
+namespace ShootThru {
+    bool Enabled = false;
+    std::string AOB = "0F 11 02 0F 11 4A 10 44 0F 28 0D";
+    BYTE nops[] = { 0x90, 0x90, 0x90 };
+    BYTE origBytes[3] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// Chams: Renders players or objects with solid colors, visible through walls.
+namespace Chams {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "0F 10 02 48 83 C1 60";
+    std::string shellcode_hex = "b8 a6 95 80 80 39 42 78 0f 85 06 00 00 00 c7 02 00 00 20 41 0f 10 02 48 83 c1 60 e9 00 00 00 00";
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// ImmuneBosses: Makes bosses immune to damage (potentially for trolling or specific scenarios).
+namespace ImmuneBosses {
+    std::atomic<bool> Enabled = false; // Toggles the feature.
+    std::atomic<bool> ThreadRunning = false; // Indicates if the AOB scan thread for this feature is active.
+    std::atomic<uintptr_t> Address{0}; // Address of the boss health instruction to patch.
+}
+// AbilityCharge: Modifies ability charge rates or cooldowns.
+namespace AbilityCharge {
+    bool Enabled = false; // Hotkey-based toggle.
+    bool WasKeyDown = false; // Previous state of the hotkey.
+    static bool mem_allocated = false; // Codecave allocation flag for this feature.
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "0F 10 02 48 83 C1 60";
+    std::vector<BYTE> shellcode = HexToBytes("50 b8 00 00 80 3f f3 0f 2a c0 48 83 c1 60 58 e9 00 00 00 00");
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// ImmuneAura: Makes the player immune to certain types of area damage or effects.
+namespace ImmuneAura {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "0F 10 02 48 83 C1 60";
+    std::string shellcode_hex = "50 b8 e8 03 00 00 f3 0f 2a c0 48 83 c1 60 58 e9 00 00 00 00";
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// IcarusDash: Infinite or modified Icarus Dash (Warlock ability).
+namespace IcarusDash {
+    bool Enabled = false;
+    std::string AOB = "89 46 34 89 6E 3C";
+    BYTE nops[] = { 0x90, 0x90, 0x90 };
+    BYTE origBytes[3] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InstantInteract: Allows for instant interaction with objects.
+namespace InstantInteract {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "F3 0F 11 43 08 48 83 C4 30 5B C3 48";
+    std::string shellcode_hex = "c7 43 08 00 00 00 00 e9 00 00 00 00";
+    BYTE origBytes[5] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InteractThruWalls: Allows interaction with objects through walls.
+namespace InteractThruWalls {
+    bool Enabled = false;
+    bool mem_allocated1 = false; // Allocation flag for the first hook.
+    bool mem_allocated2 = false; // Allocation flag for the second hook.
+    std::atomic<uintptr_t> memAllocatedAddress1{0};
+    std::atomic<uintptr_t> memAllocatedAddress2{0};
+    std::string AOB1 = "8B 54 01 6C 8B 4F 24";
+    std::string AOB2 = "0F 11 02 0F 11 4A 10 44 0F 28 0D";
+    std::string shellcode1_hex = "c7 44 01 6c 00 00 7a 44 8b 54 01 6c 8b 4f 24 e9 00 00 00 00";
+    std::string shellcode2_hex = "c7 02 10 27 00 00 0f 11 4a 10 e9 00 00 00 00";
+    BYTE origBytes1[7] = {};
+    BYTE origBytes2[7] = {};
+    std::atomic<uintptr_t> InstructionAddress1{0};
+    std::atomic<uintptr_t> InstructionAddress2{0};
+}
+// GameSpeed: Modifies the overall game speed.
+namespace GameSpeed {
+    bool Enabled = false; // Hotkey-based toggle.
+    std::string AOB = "00 5B 24 49 00 24 74 49 0A D7 23 3C 0A D7 23 3C 0A D7 23 3C 0A D7 23 3C 00 00 00 00 00 00 00 00 00 00 00";
+    std::atomic<uintptr_t> Address{0}; // Address of the game speed variable.
+    float FastValue = 9000.0f;
+    float NormalValue = 673200.0f;
+    bool WasKeyDown = false; // Previous state of the hotkey.
+}
+// LobbyCrasher: Intentionally crashes game lobbies (use with extreme caution).
+namespace LobbyCrasher {
+    bool Enabled = false;
+    std::string AOB = "C7 43 04 FF FF FF FF C6 03 01 48 83 C4 20 5B C3 48 8B";
+    BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// GSize: Modifies guardian (player character) size.
+namespace GSize {
+    bool Enabled = false;
+    std::string AOB = "00 00 80 3F 80 F0 FA 02";
+    float Value = 0.0f; // Current size value.
+    float inputVal = 0; // Value from ImGui input field.
+    std::atomic<uintptr_t> Address{0}; // Address of the size variable.
+}
+// Oxygen: Infinite oxygen for underwater/space environments.
+namespace Oxygen {
+    bool Enabled = false;
+    std::string AOB = "0F 28 C8 E8 ? ? ? ? 0F B6 43 0C";
+    BYTE nops[] = { 0x90 ,0x90, 0x90 };
+    BYTE origBytes[3] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfSparrowBoost: Infinite boost for Sparrow vehicles.
+namespace InfSparrowBoost {
+    bool Enabled = false;
+    std::string AOB = "72 34 48 8D 4B 50";
+    BYTE myByte[] = { 0x77 };
+    BYTE origByte[] = { 0x72 };
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfBuffTimers: Infinite timers for buffs.
+namespace InfBuffTimers {
+    bool Enabled = false;
+    std::string AOB = "48 89 8B A0 00 00 00 48 8D 4C 24 30 E8 ? ? ? ? 48 8B 08 48 39";
+    BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes[7] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// InfExoticBuffTimers: Infinite timers specifically for exotic weapon/armor buffs.
+namespace InfExoticBuffTimers {
+    bool Enabled = false;
+    std::string AOB = "F3 0F 5C C7 F3 0F 5F C6 0F 2E";
+    BYTE nops[] = {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+    BYTE origBytes[8] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// AntiFlinch: Removes or reduces player flinch when taking damage.
+namespace AntiFlinch {
+    bool Enabled = false;
+    std::string AOB1 = "F3 0F 11 8B E0 16 00 00";
+    std::string AOB2 = "F3 0F 11 8B E4 16 00 00";
+    std::string AOB3 = "F3 0F 11 83 E8 16 00 00";
+    BYTE nops[] = { 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
+    BYTE origBytes1[8] = {};
+    BYTE origBytes2[8] = {};
+    BYTE origBytes3[8] = {};
+    std::atomic<uintptr_t> InstructionAddress1{0};
+    std::atomic<uintptr_t> InstructionAddress2{0};
+    std::atomic<uintptr_t> InstructionAddress3{0};
+}
+// ActivityLoader: Loads players into specific game activities.
+// Shellcode writes RDX (presumably containing player/activity data) to a dynamically allocated memory location.
+namespace ActivityLoader {
+    bool Enabled = false;
+    bool mem_allocated = false; // For the shellcode codecave.
+    std::atomic<uintptr_t> memAllocatedAddress{0}; // Address of the shellcode codecave.
+    std::atomic<uintptr_t> addrMemAllocatedAddress{0}; // Dynamically allocated memory to store data (pointed to by RDX in shellcode).
+    bool addr_mem_allocated = false; // Flag for addrMemAllocatedAddress allocation.
+    std::string AOB = "44 0F B7 4A 02 44";
+    std::string shellcode_hex = "48 B8 00 00 00 00 00 00 00 00 48 89 10 44 0F B7 4A 02"; // Placeholder 00s for addrMemAllocatedAddress.
+    BYTE origBytes[5] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
+// Mag999: Likely refers to a "Max Magazine" or similar ammo-related feature.
+namespace Mag999 {
+    bool Enabled = false;
+    bool mem_allocated = false;
+    std::atomic<uintptr_t> memAllocatedAddress{0};
+    std::string AOB = "0F 10 04 C1 48 83 C2 10 49";
+    std::string shellcode_hex = "50 B8 8A 49 FD 79 66 0F 6E D0 58 F3 0F 10 44 C1 B8 0F 2E C2 0F 85 16 00 00 00 50 B8 20 BC BE 4C 66 0F 6E D0 58 F3 0F 11 14 C1 F3 0F 11 54 C1 50 50 B8 02 03 02 34 66 0F 6E D0 58 F3 0F 10 44 C1 B8 0F 2E C2 0F 85 16 00 00 00 50 B8 20 BC BE 4C 66 0F 6E D0 58 F3 0F 11 14 C1 F3 0F 11 54 C1 10 0F 10 04 C1 48 83 C2 10 E9 00 00 00 00";
+    BYTE origBytes[8] = {};
+    std::atomic<uintptr_t> InstructionAddress{0};
+}
 
 
 const SIZE_T DEFAULT_SCAN_REGION_SIZE = 0x7FFFFFF;
+// Iterates through features, performs AOB scans using DriverComm::aob_scan_info,
+// and stores results in respective InstructionAddress atomics.
+// This is typically called once during initialization after the target process is found.
 inline void PerformStartupAobScans(DWORD pid, uintptr_t moduleBaseAddress) {
     if (moduleBaseAddress == 0) {
         LogMessage("[-] PerformStartupAobScans: Invalid moduleBaseAddress (0).");
@@ -211,6 +566,9 @@ inline bool ReadOriginalBytes(std::atomic<uintptr_t>& address_atomic, BYTE(&orig
     return NT_SUCCESS(DriverComm::read_memory_buffer(address, origBytes_array, N, nullptr));
 }
 
+// Iterates through features that have a valid InstructionAddress (found via AOB scan)
+// and reads the original bytes from memory at that address into their respective origBytes arrays.
+// This is crucial for restoring game code when a feature is disabled.
 inline void PerformStartupByteReads(DWORD pid, uintptr_t moduleBaseAddress) {
     UNREFERENCED_PARAMETER(moduleBaseAddress); UNREFERENCED_PARAMETER(pid);
     // Using .load() for checking the address before calling ReadOriginalBytes

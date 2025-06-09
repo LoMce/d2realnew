@@ -34,7 +34,29 @@
 // Static global for the target module name
 static std::wstring g_wModuleName = L"Destiny 2.exe";
 
-// Definition for the background AOB scanning thread function
+/**
+ * @brief Background thread function to initialize feature signatures and byte patterns.
+ *
+ * This function is designed to run in a separate thread after the target game process
+ * is found and its module base address is obtained. Its primary responsibilities are:
+ * 1. Calling `Features::PerformStartupAobScans` to perform Array of Bytes (AOB) scans
+ *    for all defined features. This populates the `InstructionAddress` for each feature
+ *    if the AOB pattern is found in the target process's memory.
+ * 2. Calling `Features::PerformStartupByteReads` to read and store the original bytes
+ *    at the identified instruction addresses. These original bytes are crucial for
+ *    disabling features and restoring the game's original code.
+ * 3. Setting the global flag `Features::g_aob_scan_complete_flag` to true upon successful
+ *    completion of both scans and byte reads. This flag signals that features are ready
+ *    to be activated or have their states updated.
+ * 4. Setting `Features::g_aob_scan_running` to false once operations are complete or if
+ *    an early exit occurs due to invalid parameters.
+ *
+ * This asynchronous approach prevents the main UI or game interaction thread from freezing
+ * during potentially time-consuming memory scanning operations.
+ *
+ * @param moduleBase The base address of the target game module in the target process.
+ * @param processId The Process ID (PID) of the target game process.
+ */
 void AsyncInitializeSignaturesAndBytes_ThreadFunc(uintptr_t moduleBase, DWORD processId) {
     if (moduleBase == 0 || processId == 0) {
         LogMessageF("[-] AsyncInitializeSignaturesAndBytes_ThreadFunc: Invalid parameters (moduleBase: 0x%llX, processId: %lu). Aborting scan.", moduleBase, processId);
@@ -66,7 +88,30 @@ void AsyncInitializeSignaturesAndBytes_ThreadFunc(uintptr_t moduleBase, DWORD pr
     Features::g_aob_scan_running = false;
 }
 
-// New function to disable and clean up all features
+/**
+ * @brief Disables all active features, restores original game code, and cleans up resources.
+ *
+ * This function is critical for a safe shutdown or detachment from the target process.
+ * It iterates through all managed features and performs the following actions for each:
+ * - If the feature is currently `Enabled` and has a valid `InstructionAddress` (meaning it was hooked):
+ *   - Restores the original bytes at the `InstructionAddress` to remove the hook.
+ *   - If the feature had allocated a codecave (`mem_allocated` is true and `memAllocatedAddress` is valid),
+ *     it calls `Features::ReleaseCodecave` to free that memory in the target process.
+ * - Sets the feature's `Enabled` flag to `false`.
+ *
+ * Additionally, this function is responsible for stopping and joining any feature-specific
+ * background threads that might be running, such as:
+ * - `FlyThread` (for the LocalPlayer Fly feature)
+ * - `ImmuneBossesThread` (for the ImmuneBosses feature)
+ * - `g_FindPlayerThread` (for automatically finding player data)
+ * - Signals the `ViewAngles::CacheLoop` to stop (though it's a detached thread and cannot be joined directly).
+ *
+ * The goal is to revert all modifications made to the game and terminate all driver-initiated
+ * activities related to the features, ensuring the game returns to its original state and
+ * no driver resources are left lingering or causing issues.
+ *
+ * @param pid_param The Process ID of the target game process, used for memory operations.
+ */
 static void DisableAndCleanupAllFeatures(DWORD pid_param) {
     LogMessage("----------------------------------------------------------");
     LogMessageF("[+] DisableAndCleanupAllFeatures: Starting cleanup for PID %lu...", pid_param);
@@ -367,14 +412,36 @@ static void DisableAndCleanupAllFeatures(DWORD pid_param) {
 }
 
 
-
 // Global instruction toggles
 // Note: pid and moduleBaseAddress are now global to Drawing.cpp, set during initialization in Drawing::Draw
 static std::map<std::string, bool> g_feature_critical_error_flags; // UI error flags
 static DWORD g_current_pid_drawing = 0;
 static uintptr_t g_moduleBaseAddress_drawing = 0;
 
-// New function to reset all feature states, typically on process loss
+/**
+ * @brief Resets all feature states and critical global variables to their default/initial values.
+ *
+ * This function is typically called when the target process is lost or during a full
+ * re-initialization of the cheat. Its main responsibilities are:
+ * - Setting all feature `Enabled` flags (e.g., `Killaura::Enabled`, `LocalPlayer::Enabled`) to `false`.
+ * - Clearing all stored runtime data for each feature. This includes:
+ *   - `InstructionAddress`: The resolved memory address of the hooked instruction.
+ *   - `memAllocatedAddress`: The address of any codecave allocated for the feature.
+ *   - `mem_allocated`: The flag indicating if a codecave was allocated.
+ *   - For features with multiple hooks or specific pointer storage (like `LocalPlayer`, `ViewAngles`,
+ *     `ActivityLoader`, `InteractThruWalls`), their respective address and allocation flag variables
+ *     are also reset (e.g., `LocalPlayer::addrMemAllocatedAddress`, `LocalPlayer::addr_mem_allocated`).
+ * - Resetting any other feature-specific state variables to their defaults (e.g., `LocalPlayer::flyEnabled`,
+ *   `AbilityCharge::WasKeyDown`).
+ * - Clearing global state variables related to the attached game process:
+ *   - `isInitialized`: Set to `false`.
+ *   - `g_current_pid_drawing`: Set to `0`.
+ *   - `g_moduleBaseAddress_drawing`: Set to `0`.
+ * - Resetting UI-specific error flags (`g_feature_critical_error_flags`) for all features.
+ *
+ * This function ensures that the system is in a clean state before attempting a new
+ * attachment to a process or when the current attachment is no longer valid.
+ */
 static void ResetAllFeatureStates() {
     LogMessage("[+] Resetting all feature states, addresses, and flags.");
 
@@ -517,9 +584,7 @@ void ActualImmuneBossesThreadLogic(DWORD pid_param) { // pid_param is passed but
     uintptr_t moduleBaseAddress = g_moduleBaseAddress_drawing;
 
     if (moduleBaseAddress == 0) {
-        #ifdef _DEBUG
-        LogMessage("[-] [ActualImmuneBossesThreadLogic] Module base address is 0. Cannot perform AOB scan.");
-        #endif
+        LogMessage("[-] [ActualImmuneBossesThreadLogic] Module base address is 0. Cannot perform AOB scan."); // Kept for release
         ImmuneBosses::Address = 0;
         ImmuneBosses::Enabled = false;
         ImmuneBosses::ThreadRunning.store(false);
@@ -544,16 +609,12 @@ void ActualImmuneBossesThreadLogic(DWORD pid_param) { // pid_param is passed but
             LogMessageF("[+] [ActualImmuneBossesThreadLogic] Patched successfully at 0x%llX.", found_addr);
             #endif
         } else {
-            #ifdef _DEBUG
-            LogMessageF("[-] [ActualImmuneBossesThreadLogic] Failed to write to address 0x%llX.", found_addr);
-            #endif
+            LogMessageF("[-] [ActualImmuneBossesThreadLogic] Failed to write to address 0x%llX.", found_addr); // Kept for release
             ImmuneBosses::Address = 0;
             ImmuneBosses::Enabled = false; // Disable if write failed
         }
     } else {
-        #ifdef _DEBUG
-        LogMessage("[-] [ActualImmuneBossesThreadLogic] Boss health AOB not found.");
-        #endif
+        LogMessage("[-] [ActualImmuneBossesThreadLogic] Boss health AOB not found."); // Kept for release
         ImmuneBosses::Address = 0;
         ImmuneBosses::Enabled = false; // Disable if AOB scan failed
     }
@@ -591,9 +652,19 @@ inline void LimitFPS(double targetFPS = 90.0)
     lastTime = high_resolution_clock::now();
 }
 
-// Uses DriverComm::g_pid implicitly via DriverComm calls, and g_moduleBaseAddress_drawing
-void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t destinyBase is now g_moduleBaseAddress_drawing + LocalPlayer::destinyBase
-    static bool previousFlyState = false; // Added
+/**
+ * @brief Polls for the Fly feature hotkey and manages its state.
+ *
+ * Checks if the FlyToggle hotkey (default F1) is pressed. If so, it toggles `LocalPlayer::flyEnabled`.
+ * If fly mode is newly enabled:
+ *   - Injects shellcode to disable gravity if `LocalPlayer::disableGravAddress` is valid.
+ *   - Starts the `FlyLoop` thread to handle flight mechanics.
+ * If fly mode is newly disabled:
+ *   - Restores original bytes at `LocalPlayer::disableGravAddress` to re-enable gravity.
+ *   - Signals the `FlyLoop` thread to stop and joins it.
+ */
+void PollFly() {
+    static bool previousFlyState = false;
     uintptr_t destinyBaseForFly = g_moduleBaseAddress_drawing + LocalPlayer::destinyBase;
 
     bool flyKeyDown = (GetAsyncKeyState(Hotkeys["FlyToggle"]) & 0x8000) != 0;
@@ -605,15 +676,15 @@ void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t desti
     }
     wasFlyKeyDown = flyKeyDown;
 
-    if (Features::LocalPlayer::flyEnabled && !previousFlyState) { // Just enabled Fly
+    if (Features::LocalPlayer::flyEnabled && !previousFlyState) {
         if (LocalPlayer::disableGravAddress != 0) {
             std::vector<BYTE> disableGravShellcodeBytes = HexToBytes(LocalPlayer::disableGravShellcode_hex);
-            uintptr_t temp_cave_addr_grav = LocalPlayer::disableGravMemAllocatedAddress; // Pass existing or 0
+            uintptr_t temp_cave_addr_grav = LocalPlayer::disableGravMemAllocatedAddress;
             if(!Features::InjectCodecave(g_current_pid_drawing, LocalPlayer::disableGravAddress, disableGravShellcodeBytes, sizeof(LocalPlayer::disableGravOrigBytes), temp_cave_addr_grav)) {
                  LogMessageF("[-] [PollFly] Failed to inject disableGravShellcode at 0x%llX.", LocalPlayer::disableGravAddress);
                  Features::LocalPlayer::flyEnabled = false;
             } else {
-                LocalPlayer::disableGravMemAllocatedAddress = temp_cave_addr_grav; // Update if allocated
+                LocalPlayer::disableGravMemAllocatedAddress = temp_cave_addr_grav;
                 LocalPlayer::disableGrav_mem_allocated = true;
                 #ifdef _DEBUG
                 LogMessageF("[+] [PollFly] Gravity modification (fly) enabled. Cave: 0x%llX.", temp_cave_addr_grav);
@@ -627,17 +698,14 @@ void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t desti
         if (Features::LocalPlayer::flyEnabled) {
             StopFlyThread = false;
             if (FlyThread.joinable()) {
-                // LogMessage("[+] [PollFly] Previous FlyThread is joinable, joining..."); // Optional: for debugging
                 FlyThread.join();
-                // LogMessage("[+] [PollFly] Previous FlyThread joined."); // Optional: for debugging
             }
             FlyThread = std::thread(FlyLoop, destinyBaseForFly);
-            // FlyThread.detach(); // No longer detaching - thread is now joinable
             #ifdef _DEBUG
             LogMessage("[+] [PollFly] FlyLoop thread started (now joinable).");
             #endif
         }
-    } else if (!Features::LocalPlayer::flyEnabled && previousFlyState) { // Just disabled Fly
+    } else if (!Features::LocalPlayer::flyEnabled && previousFlyState) {
         StopFlyThread = true;
         if (LocalPlayer::disableGravAddress != 0 && LocalPlayer::disableGrav_mem_allocated) {
             if(DriverComm::write_memory_buffer(LocalPlayer::disableGravAddress, LocalPlayer::disableGravOrigBytes, sizeof(LocalPlayer::disableGravOrigBytes))){
@@ -647,7 +715,6 @@ void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t desti
             } else {
                 LogMessageF("[-] [PollFly] Failed to restore original bytes for disable gravity at 0x%llX.", LocalPlayer::disableGravAddress);
             }
-            // LocalPlayer::disableGrav_mem_allocated remains true as cave can be reused.
         }
         if (FlyThread.joinable()) {
             FlyThread.join();
@@ -656,12 +723,19 @@ void PollFly() { // Removed HANDLE driver, DWORD pid parameters. uintptr_t desti
             #endif
         }
         #ifdef _DEBUG
-        LogMessage("[-] [PollFly] FlyLoop thread signaled to stop and joined."); // Adjusted log
+        LogMessage("[-] [PollFly] FlyLoop thread signaled to stop and joined.");
         #endif
     }
     previousFlyState = Features::LocalPlayer::flyEnabled;
 }
 
+/**
+ * @brief Polls for the Suicide Key hotkey and performs the action if enabled.
+ *
+ * Checks if the SuicideKey hotkey (default VK_DELETE) is pressed.
+ * If pressed and the feature `LocalPlayer::KillKeyEnabled` is active and a valid player pointer exists:
+ *   - Modifies player coordinates and velocity to simulate a death/fall out of bounds.
+ */
 void PollKillKey() {
     if (!LocalPlayer::Enabled || !LocalPlayer::KillKeyEnabled || LocalPlayer::realPlayer.load() == 0 || DriverComm::g_pid == 0)
         return;
@@ -671,9 +745,7 @@ void PollKillKey() {
     if (keyNowDown && !LocalPlayer::KillKeyWasDown) {
         uintptr_t playerBase = LocalPlayer::realPlayer.load();
         if (playerBase == 0) {
-             #ifdef _DEBUG
              LogMessage("[-] [PollKillKey] playerBase is 0. Cannot perform action.");
-             #endif
             return;
         }
         DriverComm::write_memory(playerBase + TPManager::POS_X, -10000.0f);
@@ -688,45 +760,49 @@ void PollKillKey() {
     LocalPlayer::KillKeyWasDown = keyNowDown;
 }
 
-void RenderKillKeyUI() { // No changes needed here as it's UI and hotkey logic
-    // 1) Ensure we have a default binding
+void RenderKillKeyUI() {
     if (Hotkeys["SuicideKey"] == 0)
-        Hotkeys["SuicideKey"] = LocalPlayer::KillKey;         // Default VK_J
+        Hotkeys["SuicideKey"] = LocalPlayer::KillKey;
 
     ImGui::BeginDisabled(!LocalPlayer::Enabled);
 
-    // 2) Checkbox + picker on one line
     ImGui::Toggle("Suicide Key", &LocalPlayer::KillKeyEnabled);
     ImGui::SameLine();
     static bool listening = false;
-    DrawHotkeyPicker("SuicideKey", "Key", listening);         // auto-saves to hotkeys.json
+    DrawHotkeyPicker("SuicideKey", "Key", listening);
 
     ImGui::EndDisabled();
 }
 
 void RenderAbilityChargeUI() {
-    // 1. Ensure we have a default binding
     if (Hotkeys["AbilityCharge"] == 0)
         Hotkeys["AbilityCharge"] = VK_5;
 
-    // 2. Checkbox + picker on one line
     ImGui::Toggle("Ability", &AbilityCharge::Enabled);
     ImGui::SameLine();
     static bool listening = false;
     DrawHotkeyPicker("Ability", "Key", listening);
 }
 
-// Polls once per frame to inject/restore based on key-hold
+/**
+ * @brief Polls for the Ability Charge hotkey and applies/removes the hook.
+ *
+ * This function implements a "hold-to-activate" mechanism for the AbilityCharge feature.
+ * - When the AbilityCharge hotkey (default VK_5) is pressed and `AbilityCharge::Enabled` is true:
+ *   - Injects shellcode at `AbilityCharge::InstructionAddress` to modify ability cooldowns/charge.
+ * - When the hotkey is released:
+ *   - Restores the original bytes at `AbilityCharge::InstructionAddress`.
+ *   - Releases the codecave if it was allocated by this feature.
+ * If the feature is globally disabled via `AbilityCharge::Enabled`, it ensures any active hook is removed.
+ */
 void PollAbilityCharge() {
-    static bool wasInjected = false; // Tracks if the hook is currently active from this poll function
+    static bool wasInjected = false;
     static bool currentKeyIsDown = false;
-    // Note: AbilityCharge::memAllocatedAddress is used by InjectCodecave.
-    // AbilityCharge::Enabled is the global toggle for this hotkey feature.
 
     int vk = Hotkeys["AbilityCharge"];
     if (vk == 0 || vk == -1) return;
 
-    if (!AbilityCharge::Enabled) { // Global toggle for the hotkey functionality
+    if (!AbilityCharge::Enabled) {
         if (wasInjected && AbilityCharge::InstructionAddress != 0) {
             if (DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress, AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes))) {
                 #ifdef _DEBUG
@@ -737,20 +813,17 @@ void PollAbilityCharge() {
             }
             wasInjected = false;
         }
-        currentKeyIsDown = false; // Reset key state if feature is globally disabled
+        currentKeyIsDown = false;
         return;
     }
 
     bool keyNowDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
 
-    if (keyNowDown && !currentKeyIsDown) { // Key just pressed
+    if (keyNowDown && !currentKeyIsDown) {
         if (AbilityCharge::InstructionAddress != 0) {
-            // AbilityCharge::shellcode is std::vector<BYTE>
-            // AbilityCharge::memAllocatedAddress will be used/allocated by InjectCodecave
-            uintptr_t temp_cave_addr = AbilityCharge::memAllocatedAddress.load(); // Load atomic for passing by value if needed, InjectCodecave takes atomic by ref
+            uintptr_t temp_cave_addr = AbilityCharge::memAllocatedAddress.load();
             if(Features::InjectCodecave(g_current_pid_drawing, AbilityCharge::InstructionAddress, AbilityCharge::shellcode, sizeof(AbilityCharge::origBytes), AbilityCharge::memAllocatedAddress)){
-                // AbilityCharge::memAllocatedAddress is updated by InjectCodecave directly
-                AbilityCharge::mem_allocated = true; // Mark as allocated
+                AbilityCharge::mem_allocated = true;
                 wasInjected = true;
                 #ifdef _DEBUG
                 LogMessageF("[+] [PollAbilityCharge] Activated (hooked) at 0x%llX. Codecave: 0x%llX.", AbilityCharge::InstructionAddress.load(), AbilityCharge::memAllocatedAddress.load());
@@ -761,30 +834,28 @@ void PollAbilityCharge() {
         } else {
             LogMessage("[-] [PollAbilityCharge] InstructionAddress is 0. Cannot activate.");
         }
-    } else if (!keyNowDown && currentKeyIsDown) { // Key just released
+    } else if (!keyNowDown && currentKeyIsDown) {
         if (wasInjected && AbilityCharge::InstructionAddress != 0) {
             if (DriverComm::write_memory_buffer(AbilityCharge::InstructionAddress.load(), AbilityCharge::origBytes, sizeof(AbilityCharge::origBytes))) {
                 #ifdef _DEBUG
                 LogMessageF("[-] [PollAbilityCharge] Deactivated (original bytes restored) at 0x%llX.", AbilityCharge::InstructionAddress.load());
                 #endif
-                // Release codecave if it was allocated by this feature instance
                 if (AbilityCharge::mem_allocated) {
                     Features::ReleaseCodecave(g_current_pid_drawing, AbilityCharge::memAllocatedAddress, AbilityCharge::mem_allocated);
-                    // AbilityCharge::mem_allocated is set to false by ReleaseCodecave
                 }
             } else {
                  LogMessageF("[-] [PollAbilityCharge] Failed to restore original bytes on key release for 0x%llX.", AbilityCharge::InstructionAddress.load());
             }
             wasInjected = false;
-        } else if (wasInjected) { // Address is 0 but was injected (should not happen if initial check is done)
+        } else if (wasInjected) {
             LogMessage("[-] [PollAbilityCharge] InstructionAddress is 0 on key release but was previously injected. Cannot restore bytes.");
-            wasInjected = false; // Still mark as not injected
+            wasInjected = false;
         }
     }
     currentKeyIsDown = keyNowDown;
 }
 
-void RenderImmuneBossesUI(DWORD pid_param) { // Added pid_param for consistency, though thread uses global
+void RenderImmuneBossesUI(DWORD pid_param) {
     bool state = ImmuneBosses::Enabled.load();
     if (ImGui::Toggle("Immune Bosses (Scan)", &state)) {
         ImmuneBosses::Enabled.store(state);
@@ -796,10 +867,21 @@ void RenderImmuneBossesUI(DWORD pid_param) { // Added pid_param for consistency,
     }
 }
 
-void PollImmuneBosses() { // Removed HANDLE driver, DWORD pid
+/**
+ * @brief Polls for the Immune Bosses feature toggle and manages its state.
+ *
+ * If `ImmuneBosses::Enabled` is toggled on:
+ *   - Resets `ImmuneBosses::Address`.
+ *   - Starts the `ActualImmuneBossesThreadLogic` thread to perform an AOB scan and patch boss health values.
+ * If `ImmuneBosses::Enabled` is toggled off:
+ *   - If a valid address was patched, restores the boss health value to normal (1.0f).
+ *   - Clears the stored address.
+ *   - Ensures the `ActualImmuneBossesThreadLogic` thread is joined if it was running.
+ */
+void PollImmuneBosses() {
     bool nowEnabled = ImmuneBosses::Enabled.load();
     if (nowEnabled && !wasImmuneBossesEnabled && !ImmuneBosses::ThreadRunning.load()) {
-        ImmuneBosses::Address = 0; // Reset address before starting new scan
+        ImmuneBosses::Address = 0;
         if(ImmuneBossesThread.joinable()) ImmuneBossesThread.join();
         ImmuneBossesThread = std::thread(ActualImmuneBossesThreadLogic, g_current_pid_drawing);
         ImmuneBossesThread.detach();
@@ -807,7 +889,7 @@ void PollImmuneBosses() { // Removed HANDLE driver, DWORD pid
         LogMessage("[+] [PollImmuneBosses] Started ActualImmuneBossesThreadLogic due to feature enable.");
         #endif
     } else if (!nowEnabled && wasImmuneBossesEnabled) {
-        if (ImmuneBosses::Address != 0) { // Only attempt to restore if an address was found and patched
+        if (ImmuneBosses::Address != 0) {
             float one = 1.0f;
             if (DriverComm::write_memory(ImmuneBosses::Address, one)) {
                 #ifdef _DEBUG
@@ -816,14 +898,12 @@ void PollImmuneBosses() { // Removed HANDLE driver, DWORD pid
             } else {
                 LogMessageF("[-] [PollImmuneBosses] Failed to restore Immune Bosses value at 0x%llX.", ImmuneBosses::Address);
             }
-            ImmuneBosses::Address = 0; // Clear address after restoring
+            ImmuneBosses::Address = 0;
         } else {
             #ifdef _DEBUG
             LogMessage("[-] [PollImmuneBosses] Feature disabled, but no valid address was set. No restoration needed.");
             #endif
         }
-        // Ensure the thread is signaled to stop if it was running.
-        // ActualImmuneBossesThreadLogic sets ThreadRunning to false on completion.
         if (ImmuneBossesThread.joinable()) {
             ImmuneBossesThread.join();
             #ifdef _DEBUG
@@ -842,9 +922,19 @@ void RenderGameSpeedUI() {
     DrawHotkeyPicker("GameSpeed", "", listening);
 }
 
+/**
+ * @brief Polls for the GameSpeed hotkey and applies speed modifications.
+ *
+ * This function implements a "hold-to-activate" mechanism for game speed modification.
+ * - When the GameSpeed hotkey (default VK_CAPITAL) is pressed and `GameSpeed::Enabled` is true:
+ *   - Writes `GameSpeed::FastValue` to `GameSpeed::Address`.
+ * - When the hotkey is released:
+ *   - Writes `GameSpeed::NormalValue` to `GameSpeed::Address`.
+ * If the feature is globally disabled (`GameSpeed::Enabled` is false), it ensures the game speed is restored to normal.
+ */
 void PollGameSpeed() {
-    if (!GameSpeed::Enabled) { // If globally disabled, ensure key state doesn't linger
-        if (GameSpeed::WasKeyDown && GameSpeed::Address != 0) { // If it was active and key was down
+    if (!GameSpeed::Enabled) {
+        if (GameSpeed::WasKeyDown && GameSpeed::Address != 0) {
              if (!DriverComm::write_memory(GameSpeed::Address, GameSpeed::NormalValue)) {
                 LogMessageF("[-] [PollGameSpeed] Write failed for restoring GameSpeed::NormalValue at 0x%llX on global disable.", GameSpeed::Address);
             } else {
@@ -852,15 +942,14 @@ void PollGameSpeed() {
                 LogMessageF("[-] [PollGameSpeed] Restored GameSpeed to NormalValue due to global disable. Address: 0x%llX.", GameSpeed::Address);
                 #endif
             }
-            GameSpeed::WasKeyDown = false; // Reset key state
+            GameSpeed::WasKeyDown = false;
         }
         return;
     }
 
     if (GameSpeed::Address == 0) {
         #ifdef _DEBUG
-        // This might be spammy if AOB not found yet, only log if explicitly enabled and address is 0
-        // static bool initialLogDone = false; if (!initialLogDone && GameSpeed::Enabled) { std::cout << "[-] [PollGameSpeed] GameSpeed::Address is 0. Feature active but cannot modify speed." << std::endl; initialLogDone = true; }
+        // static bool initialLogDone = false; if (!initialLogDone && GameSpeed::Enabled) { /* std::cout removed */ }
         #endif
         return;
     }
@@ -873,7 +962,9 @@ void PollGameSpeed() {
         float valueToSet = isDown ? GameSpeed::FastValue : GameSpeed::NormalValue;
         const char* speedState = isDown ? "FastValue" : "NormalValue";
         if (!DriverComm::write_memory(GameSpeed::Address, valueToSet)) {
+            #ifdef _DEBUG
             LogMessageF("[-] [PollGameSpeed] Write failed for GameSpeed::%s at 0x%llX.", speedState, GameSpeed::Address);
+            #endif
         } else {
             #ifdef _DEBUG
             LogMessageF("[+] [PollGameSpeed] Set to %s (%f) at 0x%llX.", speedState, valueToSet, GameSpeed::Address);
@@ -883,7 +974,15 @@ void PollGameSpeed() {
     }
 }
 
-void DisableViewAngleHook() { // Removed HANDLE driver
+/**
+ * @brief Disables the ViewAngles hook.
+ *
+ * This function is called to specifically revert the ViewAngles feature.
+ * - Sets `ViewAngles::g_cacheThreadRunning` to false to signal the angle caching thread to stop.
+ * - If the hook was active (`ViewAngles::InstructionAddress` is valid and `ViewAngles::mem_allocated` is true),
+ *   it restores the original bytes at the hooked address using `DriverComm::write_memory_buffer`.
+ */
+void DisableViewAngleHook() {
     ViewAngles::g_cacheThreadRunning = false;
     if (ViewAngles::InstructionAddress != 0 && ViewAngles::mem_allocated) {
         DriverComm::write_memory_buffer(ViewAngles::InstructionAddress, ViewAngles::origBytes, sizeof(ViewAngles::origBytes));
@@ -893,27 +992,60 @@ void DisableViewAngleHook() { // Removed HANDLE driver
     }
 }
 
+/**
+ * @brief Updates the state of all features based on user configuration.
+ *
+ * Called every frame via `Drawing::Poll()`, this function is the core logic for
+ * enabling or disabling features. It compares the current `Enabled` state of each
+ * feature (typically toggled by ImGui checkboxes) with its `wasEnabledFlag` (previous state).
+ *
+ * Key responsibilities:
+ * - For each feature, if its desired state (`Enabled`) has changed:
+ *   - It uses helper lambdas (`toggleShellcodeFeature` for complex hooks, `togglePatchFeature`
+ *     for simple byte/NOP patches) to manage the actual memory modifications.
+ *   - **Enabling a feature**:
+ *     - Injects shellcode (for hook-based features) using `Features::InjectCodecave`. This involves
+ *       allocating a codecave if one isn't already, writing the feature's shellcode, and
+ *       placing a jump from the original game code to the codecave.
+ *     - Applies byte patches (for NOP/byte patch features) directly to memory.
+ *   - **Disabling a feature**:
+ *     - Restores the original game bytes at the hooked/patched address.
+ *     - Releases any codecave memory that was allocated specifically for that feature
+ *       using `Features::ReleaseCodecave`.
+ * - Handles features with multiple parts or dependencies, such as:
+ *   - **LocalPlayer/ViewAngles**: Manages allocation of memory for pointers, enables/disables
+ *     both LocalPlayer and ViewAngle hooks, and starts/stops associated threads.
+ *   - **InfAmmo/InfSwordAmmo**: Enables/disables the main infinite ammo hook and a secondary
+ *     patch for sword ammo.
+ *   - **InstaRespawn/RespawnAnywhere**: Manages a direct byte patch and a shellcode hook.
+ *   - **InteractThruWalls**: Manages two separate shellcode hooks.
+ *   - **ActivityLoader**: Manages a shellcode hook and an additional memory allocation for data.
+ * - Updates `g_feature_critical_error_flags` for each feature if an operation (enable/disable)
+ *   fails critically (e.g., unable to restore original bytes), providing feedback in the UI.
+ * - Updates `wasEnabledFlag` to the new `Enabled` state after processing each feature.
+ *
+ * @param pid_param The Process ID of the target game process.
+ */
 void UpdateFeatureStates(DWORD pid_param) {
     // Helper lambda for shellcode-based features
     auto toggleShellcodeFeature = [&](
         const char* featureName, bool& enabledFlag, bool& wasEnabledFlag, uintptr_t instrAddr,
         const std::string& shellcodeHex, BYTE* origBytes, size_t origSize,
-        bool& cave_allocated_flag, std::atomic<uintptr_t>& cave_addr_var) // Corrected: cave_addr_var is std::atomic<uintptr_t>&
+        bool& cave_allocated_flag, std::atomic<uintptr_t>& cave_addr_var)
     {
-        if (enabledFlag == wasEnabledFlag) return; // No change in desired state
+        if (enabledFlag == wasEnabledFlag) return;
 
         if (instrAddr == 0) {
-            if (enabledFlag) { // Trying to enable but address is null
+            if (enabledFlag) {
                 LogMessageF("[-] [%s] InstructionAddress is 0. Cannot enable.", featureName);
-                enabledFlag = false; // Operation failed, so it's not enabled
+                enabledFlag = false;
             }
-            // If disabling and address is 0, it's already effectively "disabled" in terms of this address.
-            g_feature_critical_error_flags[featureName] = false; // No error state if nothing to operate on.
-            wasEnabledFlag = enabledFlag; // Sync with the (potentially changed) enabledFlag
+            g_feature_critical_error_flags[featureName] = false;
+            wasEnabledFlag = enabledFlag;
             return;
         }
 
-        if (enabledFlag) { // Try to enable/hook
+        if (enabledFlag) {
             std::vector<BYTE> scBytes = HexToBytes(shellcodeHex);
             if (scBytes.empty()) {
                 LogMessageF("[-] [%s] Shellcode hex string is invalid or empty. Cannot enable.", featureName);
@@ -923,22 +1055,23 @@ void UpdateFeatureStates(DWORD pid_param) {
                 return;
             }
 
-            // Pass cave_addr_var (std::atomic<uintptr_t>&) directly to InjectCodecave.
-            // InjectCodecave will use .load() and .store() internally.
             if (Features::InjectCodecave(pid_param, instrAddr, scBytes, origSize, cave_addr_var)) {
+                #ifdef _DEBUG
                 LogMessageF("[+] [%s] Enabled (hooked) at 0x%llX. Codecave at 0x%llX.", featureName, instrAddr, cave_addr_var.load());
-                cave_allocated_flag = true; // Mark as allocated since InjectCodecave succeeded
+                #endif
+                cave_allocated_flag = true;
                 g_feature_critical_error_flags[featureName] = false;
             } else {
                 LogMessageF("[-] [%s] InjectCodecave failed for address 0x%llX.", featureName, instrAddr);
-                enabledFlag = false; // Failed to enable
-                // g_feature_critical_error_flags[featureName] = true; // Optionally flag enable errors
+                enabledFlag = false;
             }
-        } else { // Try to disable/unhook
+        } else {
             if (cave_allocated_flag && cave_addr_var.load() != 0) {
                 NTSTATUS restore_status = DriverComm::write_memory_buffer(instrAddr, origBytes, origSize, nullptr);
                 if (NT_SUCCESS(restore_status)) {
+                    #ifdef _DEBUG
                     LogMessageF("[-] [%s] Disabled (bytes restored) at 0x%llX.", featureName, instrAddr);
+                    #endif
                     Features::ReleaseCodecave(pid_param, cave_addr_var, cave_allocated_flag);
                     g_feature_critical_error_flags[featureName] = false;
                 } else {
@@ -949,7 +1082,9 @@ void UpdateFeatureStates(DWORD pid_param) {
                  if (instrAddr != 0) {
                     NTSTATUS restore_status_no_cave = DriverComm::write_memory_buffer(instrAddr, origBytes, origSize, nullptr);
                      if (NT_SUCCESS(restore_status_no_cave)) {
+                        #ifdef _DEBUG
                         LogMessageF("[-] [%s] Disabled (bytes restored, no codecave info/already released) at 0x%llX.", featureName, instrAddr);
+                        #endif
                         g_feature_critical_error_flags[featureName] = false;
                     } else {
                         LogMessageF("CRITICAL: [%s] Failed to restore original bytes (no codecave info) at 0x%llX. Status: 0x%lX.", featureName, instrAddr, restore_status_no_cave);
@@ -967,7 +1102,7 @@ void UpdateFeatureStates(DWORD pid_param) {
     // Helper lambda for simple NOP/byte patch features
     auto togglePatchFeature = [&](
         const char* featureName, bool& enabledFlag, bool& wasEnabledFlag, uintptr_t instrAddr,
-        const auto& patchValue, const auto& originalValue) // Using auto for patch/original types
+        const auto& patchValue, const auto& originalValue)
     {
         if (enabledFlag == wasEnabledFlag) return;
 
@@ -982,29 +1117,26 @@ void UpdateFeatureStates(DWORD pid_param) {
         }
 
         NTSTATUS status = STATUS_UNSUCCESSFUL;
-        // Determine if patchValue is an array to call correct write_memory variant
         if constexpr (std::is_array_v<std::remove_reference_t<decltype(patchValue)>>) {
              status = DriverComm::write_memory_buffer(instrAddr, enabledFlag ? patchValue : originalValue, sizeof(originalValue), nullptr);
         } else {
-             // For single byte or other non-array types that write_memory<T> can handle
-             // Assuming DriverComm::write_memory<T> was updated to return NTSTATUS. If not, this needs adjustment.
-             // For now, let's assume a boolean return for simple types if NTSTATUS version isn't general.
              bool simple_write_success = DriverComm::write_memory(instrAddr, enabledFlag ? patchValue : originalValue);
-             status = simple_write_success ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL; // Convert bool to NTSTATUS
+             status = simple_write_success ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
         }
 
         if (!NT_SUCCESS(status)) {
             if (enabledFlag) {
                 LogMessageF("CRITICAL: [%s] Failed to apply patch at 0x%llX. Status: 0x%lX. Feature not enabled.", featureName, instrAddr, status);
                 enabledFlag = false;
-                // g_feature_critical_error_flags[featureName] = true; // Optional: flag enable errors
             } else {
                 LogMessageF("CRITICAL: [%s] Failed to restore original value at 0x%llX. Status: 0x%lX. Feature may still be active!", featureName, instrAddr, status);
                 g_feature_critical_error_flags[featureName] = true;
             }
         } else {
+            #ifdef _DEBUG
             LogMessageF("[%s] [%s] %s at 0x%llX.", (enabledFlag ? "+" : "-"), featureName, (enabledFlag ? "Enabled (patched)" : "Disabled (restored)"), instrAddr);
-            g_feature_critical_error_flags[featureName] = false; // Clear error on any successful operation
+            #endif
+            g_feature_critical_error_flags[featureName] = false;
         }
         wasEnabledFlag = enabledFlag;
     };
@@ -1013,7 +1145,7 @@ void UpdateFeatureStates(DWORD pid_param) {
     if (LocalPlayer::Enabled != wasLocalPlayerEnabled) {
         if (LocalPlayer::Enabled) {
             LogMessage("[+] [LocalPlayer/ViewAngles] Attempting to enable...");
-            g_feature_critical_error_flags["LocalPlayer"] = false; // Clear previous errors on enable attempt
+            g_feature_critical_error_flags["LocalPlayer"] = false;
             g_feature_critical_error_flags["ViewAngles"] = false;
 
             bool lpAddrOk = LocalPlayer::addrMemAllocatedAddress.load() != 0;
@@ -1021,7 +1153,9 @@ void UpdateFeatureStates(DWORD pid_param) {
                 if (DriverComm::allocate_memory(pid_param, sizeof(uintptr_t), LocalPlayer::addrMemAllocatedAddress, nullptr)) {
                     LocalPlayer::addr_mem_allocated = true;
                     lpAddrOk = true;
+                    #ifdef _DEBUG
                     LogMessageF("[+] [LocalPlayer] Allocated addrMemAllocatedAddress at 0x%llX.", LocalPlayer::addrMemAllocatedAddress.load());
+                    #endif
                 } else {
                     LocalPlayer::addr_mem_allocated = false;
                     lpAddrOk = false;
@@ -1036,7 +1170,9 @@ void UpdateFeatureStates(DWORD pid_param) {
                 if (DriverComm::allocate_memory(pid_param, sizeof(uintptr_t), ViewAngles::addrMemAllocatedAddress, nullptr)) {
                     ViewAngles::addr_mem_allocated = true;
                     vaAddrOk = true;
+                    #ifdef _DEBUG
                     LogMessageF("[+] [ViewAngles] Allocated addrMemAllocatedAddress at 0x%llX.", ViewAngles::addrMemAllocatedAddress.load());
+                    #endif
                 } else {
                     ViewAngles::addr_mem_allocated = false;
                     vaAddrOk = false;
@@ -1056,10 +1192,12 @@ void UpdateFeatureStates(DWORD pid_param) {
                 if (lpSuccess && vaSuccess) {
                     g_StopFindThread = false;
                     g_FindPlayerEnabled = true;
-                    if(g_FindPlayerThread.joinable()) g_FindPlayerThread.join(); // Join previous before starting new
+                    if(g_FindPlayerThread.joinable()) g_FindPlayerThread.join();
                     g_FindPlayerThread = std::thread(AutoFindPlayerLoop, pid_param, g_moduleBaseAddress_drawing + LocalPlayer::destinyBase, std::ref(LocalPlayer::realPlayer));
                     g_FindPlayerThread.detach();
+                    #ifdef _DEBUG
                     LogMessage("[+] [LocalPlayer/ViewAngles] Hooks enabled, threads started.");
+                    #endif
                     g_feature_critical_error_flags["LocalPlayer"] = false;
                     g_feature_critical_error_flags["ViewAngles"] = false;
                 } else {
@@ -1072,19 +1210,17 @@ void UpdateFeatureStates(DWORD pid_param) {
                         DriverComm::write_memory_buffer(ViewAngles::InstructionAddress.load(), ViewAngles::origBytes, sizeof(ViewAngles::origBytes), nullptr);
                         Features::ReleaseCodecave(pid_param, ViewAngles::memAllocatedAddress, ViewAngles::mem_allocated);
                     }
-                    // Don't set critical error flag here as it's an enable failure, not disable. User can retry.
-                    LocalPlayer::Enabled = false; // Reflect that enabling failed.
+                    LocalPlayer::Enabled = false;
                 }
             } else {
                 LogMessage("[-] [LocalPlayer/ViewAngles] Failed to allocate necessary pointer memory. Feature disabled.");
-                LocalPlayer::Enabled = false; // Reflect that enabling failed.
+                LocalPlayer::Enabled = false;
             }
-        } else { // Disabling LocalPlayer
+        } else {
             LogMessage("[-] [LocalPlayer/ViewAngles] Attempting to disable...");
             bool lp_disable_ok = true;
             bool va_disable_ok = true;
 
-            // Disable LocalPlayer Hook
             if (LocalPlayer::InstructionAddress.load() != 0 && LocalPlayer::mem_allocated) {
                 NTSTATUS lp_restore_status = DriverComm::write_memory_buffer(LocalPlayer::InstructionAddress.load(), LocalPlayer::origBytes, sizeof(LocalPlayer::origBytes), nullptr);
                 if (NT_SUCCESS(lp_restore_status)) {
@@ -1102,15 +1238,13 @@ void UpdateFeatureStates(DWORD pid_param) {
                     LocalPlayer::addr_mem_allocated = false;
                 } else {
                     LogMessageF("CRITICAL: [LocalPlayer] Failed to free addrMemAllocatedAddress at 0x%llX. Status: 0x%lX", LocalPlayer::addrMemAllocatedAddress.load(), lp_free_status);
-                    g_feature_critical_error_flags["LocalPlayer"] = true; // Potentially already set by byte restore failure
+                    g_feature_critical_error_flags["LocalPlayer"] = true;
                     lp_disable_ok = false;
                 }
             }
              if (lp_disable_ok) g_feature_critical_error_flags["LocalPlayer"] = false;
 
-
-            // Disable ViewAngles Hook (DisableViewAngleHook modified to return status or handle flags)
-            ViewAngles::g_cacheThreadRunning.store(false); // Signal cache thread to stop
+            ViewAngles::g_cacheThreadRunning.store(false);
             if (ViewAngles::InstructionAddress.load() != 0 && ViewAngles::mem_allocated) {
                 NTSTATUS va_restore_status = DriverComm::write_memory_buffer(ViewAngles::InstructionAddress.load(), ViewAngles::origBytes, sizeof(ViewAngles::origBytes), nullptr);
                 if (NT_SUCCESS(va_restore_status)) {
@@ -1128,13 +1262,12 @@ void UpdateFeatureStates(DWORD pid_param) {
                     ViewAngles::addr_mem_allocated = false;
                 } else {
                     LogMessageF("CRITICAL: [ViewAngles] Failed to free addrMemAllocatedAddress at 0x%llX. Status: 0x%lX", ViewAngles::addrMemAllocatedAddress.load(), va_free_status);
-                    g_feature_critical_error_flags["ViewAngles"] = true; // Potentially already set
+                    g_feature_critical_error_flags["ViewAngles"] = true;
                     va_disable_ok = false;
                 }
             }
             if (va_disable_ok) g_feature_critical_error_flags["ViewAngles"] = false;
 
-            // Stop and join AutoFindPlayerLoop thread
             g_FindPlayerEnabled = false;
             g_StopFindThread = true;
             if (g_FindPlayerThread.joinable()) {
@@ -1142,7 +1275,7 @@ void UpdateFeatureStates(DWORD pid_param) {
             }
             LogMessage("[-] [LocalPlayer/ViewAngles] Disabled. Threads stopped.");
         }
-        wasLocalPlayerEnabled = LocalPlayer::Enabled; // User's intended state
+        wasLocalPlayerEnabled = LocalPlayer::Enabled;
     }
 
     // Shellcode-based Features
@@ -1163,24 +1296,26 @@ void UpdateFeatureStates(DWORD pid_param) {
     if (InfAmmo::Enabled != wasInfAmmoEnabled) {
         if (InfAmmo::Enabled) {
             LogMessage("[+] [InfAmmo/InfSwordAmmo] Attempting to enable...");
-            g_feature_critical_error_flags["InfAmmo"] = false; // Clear previous error
+            g_feature_critical_error_flags["InfAmmo"] = false;
             bool mainHookSuccess = Features::EnableInfiniteAmmo(pid_param);
             if (mainHookSuccess) {
+                #ifdef _DEBUG
                 LogMessageF("[+] [InfAmmo] Main hook enabled at 0x%llX.", InfAmmo::InstructionAddress.load());
+                #endif
                 if (InfSwordAmmo::InstructionAddress.load() != 0) {
                     if (DriverComm::write_memory(InfSwordAmmo::InstructionAddress.load(), InfSwordAmmo::nops)) {
+                        #ifdef _DEBUG
                         LogMessageF("[+] [InfSwordAmmo] Patched NOPs at 0x%llX.", InfSwordAmmo::InstructionAddress.load());
+                        #endif
                     } else {
                         LogMessageF("[-] [InfSwordAmmo] Failed NOP patch at 0x%llX.", InfSwordAmmo::InstructionAddress.load());
-                        // This is a partial failure of the composite feature. Decide if this makes InfAmmo critical.
-                        // For now, main hook success means InfAmmo itself is not in critical error.
                     }
                 } else LogMessage("[!] [InfSwordAmmo] InstructionAddress is 0.");
             } else {
                 LogMessageF("[-] [InfAmmo] Main hook failed at 0x%llX.", InfAmmo::InstructionAddress.load());
-                InfAmmo::Enabled = false; // Reflect enable failure
+                InfAmmo::Enabled = false;
             }
-        } else { // Disabling InfAmmo
+        } else {
             LogMessage("[-] [InfAmmo/InfSwordAmmo] Attempting to disable...");
             bool infAmmo_disable_ok = true;
             if (InfAmmo::InstructionAddress.load() != 0 && InfAmmo::mem_allocated) {
@@ -1193,13 +1328,11 @@ void UpdateFeatureStates(DWORD pid_param) {
                     infAmmo_disable_ok = false;
                 }
             }
-            if (InfSwordAmmo::InstructionAddress.load() != 0 && wasInfAmmoEnabled) { // Check wasInfAmmoEnabled to ensure it was on
-                // Assuming InfSwordAmmo::origBytes is the correct type for DriverComm::write_memory or DriverComm::write_memory_buffer
-                // If InfSwordAmmo::nops and ::origBytes are arrays:
+            if (InfSwordAmmo::InstructionAddress.load() != 0 && wasInfAmmoEnabled) {
                 NTSTATUS sword_restore_status = DriverComm::write_memory_buffer(InfSwordAmmo::InstructionAddress.load(), InfSwordAmmo::origBytes, sizeof(InfSwordAmmo::origBytes), nullptr);
                 if (!NT_SUCCESS(sword_restore_status)) {
                     LogMessageF("CRITICAL: [InfSwordAmmo] Failed to restore bytes at 0x%llX. Status: 0x%lX", InfSwordAmmo::InstructionAddress.load(), sword_restore_status);
-                    g_feature_critical_error_flags["InfAmmo"] = true; // Flag the main feature if sub-part fails
+                    g_feature_critical_error_flags["InfAmmo"] = true;
                     infAmmo_disable_ok = false;
                 }
             }
@@ -1212,25 +1345,28 @@ void UpdateFeatureStates(DWORD pid_param) {
     if (InstaRespawn::Enabled != wasInstaRespawnEnabled) {
         if (InstaRespawn::Enabled) {
             LogMessage("[+] [InstaRespawn/RespawnAnywhere] Attempting to enable...");
-            g_feature_critical_error_flags["InstaRespawn"] = false; // Clear previous error
+            g_feature_critical_error_flags["InstaRespawn"] = false;
 
             bool instaSuccess = false;
             if (InstaRespawn::InstructionAddress.load() != 0) {
                 NTSTATUS patch_status = DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress.load(), InstaRespawn::myBytes, sizeof(InstaRespawn::myBytes), nullptr);
                 instaSuccess = NT_SUCCESS(patch_status);
+                #ifdef _DEBUG
                 if(instaSuccess) LogMessageF("[+] [InstaRespawn] Patched at 0x%llX.", InstaRespawn::InstructionAddress.load());
-                else LogMessageF("[-] [InstaRespawn] Patch failed at 0x%llX. Status: 0x%lX", InstaRespawn::InstructionAddress.load(), patch_status);
+                #endif
+                if(!instaSuccess) LogMessageF("[-] [InstaRespawn] Patch failed at 0x%llX. Status: 0x%lX", InstaRespawn::InstructionAddress.load(), patch_status);
             } else LogMessage("[-] [InstaRespawn] InstructionAddress is 0.");
 
             bool raSuccess = false;
             if (instaSuccess) {
                 std::vector<BYTE> scBytesRA = HexToBytes(RespawnAnywhere::shellcode_hex);
                 if (!scBytesRA.empty() && RespawnAnywhere::InstructionAddress.load() != 0) {
-                    // Pass RespawnAnywhere::memAllocatedAddress directly
                     if (Features::InjectCodecave(pid_param, RespawnAnywhere::InstructionAddress.load(), scBytesRA, sizeof(RespawnAnywhere::origBytes), RespawnAnywhere::memAllocatedAddress)) {
-                        RespawnAnywhere::mem_allocated = true; // InjectCodecave was successful, so cave is allocated
+                        RespawnAnywhere::mem_allocated = true;
                         raSuccess = true;
+                        #ifdef _DEBUG
                         LogMessageF("[+] [RespawnAnywhere] Hooked at 0x%llX.", RespawnAnywhere::InstructionAddress.load());
+                        #endif
                     } else LogMessageF("[-] [RespawnAnywhere] Hook failed at 0x%llX.", RespawnAnywhere::InstructionAddress.load());
                 } else LogMessageF("[-] [RespawnAnywhere] Invalid shellcode or address 0x%llX.", RespawnAnywhere::InstructionAddress.load());
             }
@@ -1239,14 +1375,14 @@ void UpdateFeatureStates(DWORD pid_param) {
                 LogMessage("[-] [InstaRespawn/RespawnAnywhere] Enabling failed. Reverting.");
                 if (raSuccess && RespawnAnywhere::InstructionAddress.load() != 0 && RespawnAnywhere::mem_allocated) {
                     DriverComm::write_memory_buffer(RespawnAnywhere::InstructionAddress.load(), RespawnAnywhere::origBytes, sizeof(RespawnAnywhere::origBytes), nullptr);
-                    Features::ReleaseCodecave(pid_param, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated); // Clean up cave
+                    Features::ReleaseCodecave(pid_param, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated);
                 }
-                if (instaSuccess && InstaRespawn::InstructionAddress.load() != 0) { // If only insta part succeeded and RA failed
+                if (instaSuccess && InstaRespawn::InstructionAddress.load() != 0) {
                     DriverComm::write_memory_buffer(InstaRespawn::InstructionAddress.load(), InstaRespawn::origBytes, sizeof(InstaRespawn::origBytes), nullptr);
                 }
-                InstaRespawn::Enabled = false; // Reflect enable failure
+                InstaRespawn::Enabled = false;
             }
-        } else { // Disabling InstaRespawn
+        } else {
             LogMessage("[-] [InstaRespawn/RespawnAnywhere] Attempting to disable...");
             bool insta_disable_ok = true;
             if (InstaRespawn::InstructionAddress.load() != 0 && wasInstaRespawnEnabled) {
@@ -1263,7 +1399,7 @@ void UpdateFeatureStates(DWORD pid_param) {
                     Features::ReleaseCodecave(pid_param, RespawnAnywhere::memAllocatedAddress, RespawnAnywhere::mem_allocated);
                 } else {
                     LogMessageF("CRITICAL: [RespawnAnywhere] Failed to restore bytes at 0x%llX. Status: 0x%lX", RespawnAnywhere::InstructionAddress.load(), ra_restore_status);
-                    g_feature_critical_error_flags["InstaRespawn"] = true; // Flag the main feature
+                    g_feature_critical_error_flags["InstaRespawn"] = true;
                     insta_disable_ok = false;
                 }
             }
@@ -1299,7 +1435,11 @@ void UpdateFeatureStates(DWORD pid_param) {
                     if(s2) DriverComm::write_memory(AntiFlinch::InstructionAddress2, AntiFlinch::origBytes2);
                     if(s3) DriverComm::write_memory(AntiFlinch::InstructionAddress3, AntiFlinch::origBytes3);
                     AntiFlinch::Enabled = false;
-                } else LogMessage("[+] [AntiFlinch] Enabled.");
+                } else {
+                    #ifdef _DEBUG
+                    LogMessage("[+] [AntiFlinch] Enabled.");
+                    #endif
+                }
             } else {
                 LogMessage("[-] [AntiFlinch] One or more addresses are 0. Cannot enable.");
                 AntiFlinch::Enabled = false;
@@ -1308,7 +1448,9 @@ void UpdateFeatureStates(DWORD pid_param) {
             if (AntiFlinch::InstructionAddress1 != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress1, AntiFlinch::origBytes1);
             if (AntiFlinch::InstructionAddress2 != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress2, AntiFlinch::origBytes2);
             if (AntiFlinch::InstructionAddress3 != 0) DriverComm::write_memory(AntiFlinch::InstructionAddress3, AntiFlinch::origBytes3);
+            #ifdef _DEBUG
             LogMessage("[-] [AntiFlinch] Disabled.");
+            #endif
         }
         wasAntiFlinchEnabled = AntiFlinch::Enabled;
     }
@@ -1317,14 +1459,15 @@ void UpdateFeatureStates(DWORD pid_param) {
     if (InteractThruWalls::Enabled != wasInteractThruWallsEnabled) {
         if (InteractThruWalls::Enabled) {
             LogMessage("[+] [InteractThruWalls] Attempting to enable...");
-            g_feature_critical_error_flags["InteractThruWalls"] = false; // Clear previous error
+            g_feature_critical_error_flags["InteractThruWalls"] = false;
             bool hook1Success = false;
             if (InteractThruWalls::InstructionAddress1.load() != 0) {
                 std::vector<BYTE> sc1 = HexToBytes(InteractThruWalls::shellcode1_hex);
-                // Pass atomic directly to InjectCodecave
                 if (!sc1.empty() && Features::InjectCodecave(pid_param, InteractThruWalls::InstructionAddress1.load(), sc1, sizeof(InteractThruWalls::origBytes1), InteractThruWalls::memAllocatedAddress1)) {
                     InteractThruWalls::mem_allocated1 = true; hook1Success = true;
+                    #ifdef _DEBUG
                     LogMessageF("[+] [InteractThruWalls] Hook 1 enabled at 0x%llX", InteractThruWalls::InstructionAddress1.load());
+                    #endif
                 } else LogMessageF("[-] [InteractThruWalls] Hook 1 failed at 0x%llX", InteractThruWalls::InstructionAddress1.load());
             } else LogMessage("[-] [InteractThruWalls] Hook 1 address is 0.");
 
@@ -1332,10 +1475,11 @@ void UpdateFeatureStates(DWORD pid_param) {
             if (hook1Success) {
                 if (InteractThruWalls::InstructionAddress2.load() != 0) {
                     std::vector<BYTE> sc2 = HexToBytes(InteractThruWalls::shellcode2_hex);
-                    // Pass atomic directly to InjectCodecave
                     if (!sc2.empty() && Features::InjectCodecave(pid_param, InteractThruWalls::InstructionAddress2.load(), sc2, sizeof(InteractThruWalls::origBytes2), InteractThruWalls::memAllocatedAddress2)) {
                         InteractThruWalls::mem_allocated2 = true; hook2Success = true;
+                        #ifdef _DEBUG
                         LogMessageF("[+] [InteractThruWalls] Hook 2 enabled at 0x%llX", InteractThruWalls::InstructionAddress2.load());
+                        #endif
                     } else LogMessageF("[-] [InteractThruWalls] Hook 2 failed at 0x%llX", InteractThruWalls::InstructionAddress2.load());
                 } else LogMessage("[-] [InteractThruWalls] Hook 2 address is 0.");
             }
@@ -1346,11 +1490,9 @@ void UpdateFeatureStates(DWORD pid_param) {
                     DriverComm::write_memory_buffer(InteractThruWalls::InstructionAddress1.load(), InteractThruWalls::origBytes1, sizeof(InteractThruWalls::origBytes1), nullptr);
                     Features::ReleaseCodecave(pid_param, InteractThruWalls::memAllocatedAddress1, InteractThruWalls::mem_allocated1);
                 }
-                // hook2 was only attempted if hook1 succeeded, so no need to check hook2Success for full rollback of hook2 if hook1 also failed.
-                // If hook1 succeeded but hook2 failed, hook1 is already reverted above.
-                InteractThruWalls::Enabled = false; // Reflect enable failure
+                InteractThruWalls::Enabled = false;
             }
-        } else { // Disabling InteractThruWalls
+        } else {
             LogMessage("[-] [InteractThruWalls] Attempting to disable...");
             bool disable_ok = true;
             if (InteractThruWalls::InstructionAddress1.load() != 0 && InteractThruWalls::mem_allocated1) {
@@ -1380,14 +1522,16 @@ void UpdateFeatureStates(DWORD pid_param) {
     if (ActivityLoader::Enabled != wasActivityLoaderEnabled) {
         if (ActivityLoader::Enabled) {
             LogMessage("[+] [ActivityLoader] Attempting to enable...");
-            g_feature_critical_error_flags["ActivityLoader"] = false; // Clear previous error
+            g_feature_critical_error_flags["ActivityLoader"] = false;
             if (Features::EnableActivityLoaderHook(pid_param)) {
+                #ifdef _DEBUG
                 LogMessageF("[+] [ActivityLoader] Hook enabled by EnableActivityLoaderHook for 0x%llX.", ActivityLoader::InstructionAddress.load());
+                #endif
             } else {
                 LogMessageF("[-] [ActivityLoader] EnableActivityLoaderHook failed for 0x%llX.", ActivityLoader::InstructionAddress.load());
-                ActivityLoader::Enabled = false; // Reflect enable failure
+                ActivityLoader::Enabled = false;
             }
-        } else { // Disabling ActivityLoader
+        } else {
             LogMessage("[-] [ActivityLoader] Attempting to disable...");
             bool disable_main_hook_ok = true;
             if (ActivityLoader::InstructionAddress.load() != 0 && ActivityLoader::mem_allocated) {
@@ -1400,7 +1544,6 @@ void UpdateFeatureStates(DWORD pid_param) {
                     disable_main_hook_ok = false;
                 }
             } else if (ActivityLoader::InstructionAddress.load() != 0 && !ActivityLoader::mem_allocated && wasActivityLoaderEnabled) {
-                 // Fallback if it was enabled but no codecave was marked (inconsistent state)
                  NTSTATUS restore_status = DriverComm::write_memory_buffer(ActivityLoader::InstructionAddress.load(), ActivityLoader::origBytes, sizeof(ActivityLoader::origBytes), nullptr);
                  if(!NT_SUCCESS(restore_status)) {
                     LogMessageF("CRITICAL: [ActivityLoader] Fallback restore bytes failed at 0x%llX. Status: 0x%lX", ActivityLoader::InstructionAddress.load(), restore_status);
@@ -1418,7 +1561,7 @@ void UpdateFeatureStates(DWORD pid_param) {
                     ActivityLoader::addr_mem_allocated = false;
                 } else {
                     LogMessageF("CRITICAL: [ActivityLoader] Failed to free addrMemAllocatedAddress at 0x%llX. Status: 0x%lX", ActivityLoader::addrMemAllocatedAddress.load(), free_status);
-                    g_feature_critical_error_flags["ActivityLoader"] = true; // May already be true
+                    g_feature_critical_error_flags["ActivityLoader"] = true;
                     disable_addr_mem_ok = false;
                 }
             }
@@ -1443,6 +1586,28 @@ void Drawing::Poll() {
     TPManager::Poll(); // Assuming TPManager::Poll() is already updated or will be separately
     UpdateFeatureStates(g_current_pid_drawing); // UpdateFeatureStates still takes pid_param
 }
+
+// static bool Drawing::bDraw = true; // Controls the visibility of the main ImGui window and the active state of the drawing loop.
+                                   // Set to false when the main window is closed by the user.
+static bool Drawing::bDraw = true;
+
+
+// bool Drawing::isActive() {
+//     // Returns the current state of bDraw, indicating if the main ImGui window is considered active/open.
+//     return bDraw;
+// }
+bool Drawing::isActive() {
+    return bDraw;
+}
+
+// void Drawing::Active() {
+//     // Toggles the active state of the drawing/UI. This affects the visibility of the main ImGui window.
+//     bDraw = !bDraw;
+// }
+void Drawing::Active() {
+    bDraw = !bDraw;
+}
+
 
 void Drawing::Draw() {
     SetCustomTheme();
@@ -1549,9 +1714,7 @@ void Drawing::Draw() {
                 char narrowModuleNameLog[256];
                 size_t convertedCharsLog = 0;
                 wcstombs_s(&convertedCharsLog, narrowModuleNameLog, sizeof(narrowModuleNameLog), g_wModuleName.c_str(), _TRUNCATE);
-                #ifdef _DEBUG
-                LogMessageF("[+] Drawing::Draw: %s found! Process ID: %lu", narrowModuleNameLog, g_current_pid_drawing);
-                #endif
+                LogMessageF("[+] Drawing::Draw: %s found! Process ID: %lu", narrowModuleNameLog, g_current_pid_drawing); // Kept for release
 
                 if (DriverComm::attach_to_process(g_current_pid_drawing)) {
                     #ifdef _DEBUG
@@ -1572,7 +1735,9 @@ void Drawing::Draw() {
                             Features::g_aob_scan_complete_flag = false; // Reset if re-attaching
                             std::thread sigThread(AsyncInitializeSignaturesAndBytes_ThreadFunc, g_moduleBaseAddress_drawing, g_current_pid_drawing);
                             sigThread.detach();
+                            #ifdef _DEBUG
                             LogMessage("[+] Drawing::Draw: Launched AsyncInitializeSignaturesAndBytes_ThreadFunc.");
+                            #endif
                         }
 
                         LoadHotkeys();
@@ -1603,12 +1768,10 @@ void Drawing::Draw() {
             } else {
                  static auto lastWaitingMsgTime = std::chrono::steady_clock::now();
                  if (std::chrono::duration_cast<std::chrono::seconds>(now - lastWaitingMsgTime).count() >= 5) {
-                    #ifdef _DEBUG
                     char narrowModuleNameWait[256];
                     size_t convertedCharsWait = 0;
                     wcstombs_s(&convertedCharsWait, narrowModuleNameWait, sizeof(narrowModuleNameWait), g_wModuleName.c_str(), _TRUNCATE);
-                    LogMessageF("[*] Drawing::Draw: Waiting for %s process...", narrowModuleNameWait);
-                    #endif
+                    LogMessageF("[*] Drawing::Draw: Waiting for %s process...", narrowModuleNameWait); // Kept for release
                     lastWaitingMessageTime = now;
                  }
             }
