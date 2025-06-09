@@ -61,5 +61,12 @@ namespace DriverComm {
     // Retain old free_memory for compatibility
     bool free_memory(uintptr_t address, SIZE_T size);
 
+    // Changes memory protection in the target process.
+    NTSTATUS protect_memory_ex(DWORD pid, uintptr_t address, SIZE_T size, uint32_t new_protection);
+
+    // Creates a remote thread in the target process.
+    // On success, p_thread_id will contain the Thread ID.
+    NTSTATUS create_remote_thread_ex(DWORD pid, uintptr_t start_address, uintptr_t argument, HANDLE* p_thread_id);
+
     NTSTATUS RequestDriverUnload(); // New function to request driver unload
 }

@@ -105,6 +105,14 @@ extern "C" NTSTATUS ZwQuerySystemInformation(
     ULONG SystemInformationLength,
     PULONG ReturnLength);
 
+extern "C" NTSTATUS ZwProtectVirtualMemory(
+    IN HANDLE ProcessHandle,
+    IN OUT PVOID* BaseAddress,
+    IN OUT PSIZE_T RegionSize,
+    IN ULONG NewProtect,
+    OUT PULONG OldProtect
+);
+
 // Helper Macro for Delay
 #define RELATIVE_MILLISECONDS(ms) (-10000LL * (ms))
 
@@ -916,6 +924,74 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
             }
             break;
         }
+        case CommCommand::REQUEST_PROTECT_MEMORY: {
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - REQUEST_PROTECT_MEMORY.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+            const UINT32 expected_param_size = sizeof(UINT64) + sizeof(UINT64) + sizeof(UINT32); // address + size + protection
+            if (km_slot_copy.param_size != expected_param_size) {
+                km_slot_copy.result_status_code = STATUS_INFO_LENGTH_MISMATCH;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Param size mismatch. Expected %u, Got %u.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, expected_param_size, km_slot_copy.param_size);
+                break;
+            }
+
+            UINT64 target_address_param = 0;
+            UINT64 size_param_u64 = 0;
+            UINT32 new_protection_param = 0;
+
+            memcpy(&target_address_param, km_slot_copy.parameters, sizeof(UINT64));
+            memcpy(&size_param_u64, km_slot_copy.parameters + sizeof(UINT64), sizeof(UINT64));
+            memcpy(&new_protection_param, km_slot_copy.parameters + sizeof(UINT64) + sizeof(UINT64), sizeof(UINT32));
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - TargetAddr: 0x%llX, Size: %llu, NewProtect: 0x%X.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, target_address_param, size_param_u64, new_protection_param);
+
+            if (target_address_param == 0 || size_param_u64 == 0) {
+                km_slot_copy.result_status_code = STATUS_INVALID_PARAMETER;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Invalid address or size.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+                break;
+            }
+
+            HANDLE target_process_handle_protect = NULL;
+            // command_target_eprocess is already referenced from the beginning of ProcessSlotRequest if valid PID
+            status = ObOpenObjectByPointer(
+                command_target_eprocess,
+                OBJ_KERNEL_HANDLE,
+                NULL,
+                PROCESS_VM_OPERATION, // Required for ZwProtectVirtualMemory
+                *PsProcessType,
+                KernelMode,
+                &target_process_handle_protect
+            );
+
+            if (!NT_SUCCESS(status) || target_process_handle_protect == NULL) {
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to open handle to target process %llu for ZwProtectVirtualMemory. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id, status);
+                km_slot_copy.result_status_code = status;
+                break;
+            }
+
+            PVOID base_address_ptr = (PVOID)target_address_param;
+            SIZE_T region_size_ptr = (SIZE_T)size_param_u64;
+            ULONG old_protection_dummy = 0;
+            KAPC_STATE apc_state_protect;
+
+            KeStackAttachProcess(command_target_eprocess, &apc_state_protect);
+            status = ZwProtectVirtualMemory(
+                target_process_handle_protect,
+                &base_address_ptr,
+                &region_size_ptr,
+                new_protection_param,
+                &old_protection_dummy
+            );
+            KeUnstackDetachProcess(&apc_state_protect);
+            ZwClose(target_process_handle_protect);
+
+            if (NT_SUCCESS(status)) {
+                km_slot_copy.result_status_code = STATUS_SUCCESS;
+                km_slot_copy.output_size = 0;
+                debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Memory protection changed successfully for 0x%llX. OldProtect (dummy): 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, target_address_param, old_protection_dummy);
+            } else {
+                km_slot_copy.result_status_code = status;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - ZwProtectVirtualMemory failed for 0x%llX. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, target_address_param, status);
+            }
+            break;
+        }
         case CommCommand::REQUEST_WRITE_MEMORY: {
             debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - REQUEST_WRITE_MEMORY.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
             UINT32 header_size = sizeof(UINT64) + sizeof(UINT64);
@@ -1181,6 +1257,90 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
                 km_slot_copy.result_status_code = status;
                 debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - ZwFreeVirtualMemory failed for 0x%llX. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, address_to_free_umva, status);
             }
+            break;
+        }
+        case CommCommand::REQUEST_CREATE_THREAD: {
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - REQUEST_CREATE_THREAD.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+            const UINT32 expected_param_size = sizeof(UINT64) + sizeof(UINT64); // start_address + argument
+            if (km_slot_copy.param_size != expected_param_size) {
+                km_slot_copy.result_status_code = STATUS_INFO_LENGTH_MISMATCH;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Param size mismatch for CREATE_THREAD. Expected %u, Got %u.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, expected_param_size, km_slot_copy.param_size);
+                break;
+            }
+
+            UINT64 start_address_param = 0;
+            UINT64 argument_param = 0;
+
+            memcpy(&start_address_param, km_slot_copy.parameters, sizeof(UINT64));
+            memcpy(&argument_param, km_slot_copy.parameters + sizeof(UINT64), sizeof(UINT64));
+            debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - StartAddress: 0x%llX, Argument: 0x%llX.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, start_address_param, argument_param);
+
+            if (start_address_param == 0) {
+                km_slot_copy.result_status_code = STATUS_INVALID_PARAMETER_1; // Or a more specific error for NULL start address
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Start address is NULL.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id);
+                break;
+            }
+
+            HANDLE target_process_handle_thread = NULL;
+            // command_target_eprocess is already referenced
+            status = ObOpenObjectByPointer(
+                command_target_eprocess,
+                OBJ_KERNEL_HANDLE,
+                NULL,
+                PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, // Access needed for RtlCreateUserThread
+                *PsProcessType,
+                KernelMode,
+                &target_process_handle_thread
+            );
+
+            if (!NT_SUCCESS(status) || target_process_handle_thread == NULL) {
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - Failed to open handle to target process %llu for RtlCreateUserThread. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id, status);
+                km_slot_copy.result_status_code = status;
+                break;
+            }
+
+            PVOID pStartAddress = (PVOID)start_address_param;
+            PVOID pArgument = (PVOID)argument_param;
+            HANDLE hThread = NULL;
+            CLIENT_ID clientId = { 0 };
+
+            // KAPC_STATE apc_state_createthread; // RtlCreateUserThread operates on target process handle, usually no attach needed from KM for this API directly
+            // KeStackAttachProcess(command_target_eprocess, &apc_state_createthread); // Not typically done for RtlCreateUserThread
+
+            status = RtlCreateUserThread(
+                target_process_handle_thread,
+                NULL,                       // SecurityDescriptor
+                FALSE,                      // CreateSuspended
+                0,                          // StackZeroBits
+                NULL,                       // StackReserved
+                NULL,                       // StackCommit
+                pStartAddress,
+                pArgument,
+                &hThread,                   // ThreadHandle (optional, but good to get)
+                &clientId                   // ClientId (optional, but good to get TID)
+            );
+
+            // KeUnstackDetachProcess(&apc_state_createthread); // Corresponding detach if attach was used
+
+            if (NT_SUCCESS(status)) {
+                km_slot_copy.result_status_code = STATUS_SUCCESS;
+                if (clientId.UniqueThread) { // Check if TID is available
+                    memcpy(km_slot_copy.output, &clientId.UniqueThread, sizeof(HANDLE)); // UniqueThread is HANDLE type
+                    km_slot_copy.output_size = sizeof(HANDLE);
+                    debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Remote thread created successfully in PID %llu. TID: %p, Handle: %p\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id, clientId.UniqueThread, hThread);
+                } else {
+                    km_slot_copy.output_size = 0;
+                     debug_print("[+] ProcessSlotRequest: CMD %u (ReqID %u) - Remote thread created successfully in PID %llu, but no TID returned.\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id);
+                }
+                if (hThread) {
+                    ZwClose(hThread); // Close the thread handle if we don't intend to use it further in KM
+                }
+            } else {
+                km_slot_copy.result_status_code = status;
+                km_slot_copy.output_size = 0;
+                debug_print("[-] ProcessSlotRequest: CMD %u (ReqID %u) - RtlCreateUserThread failed for PID %llu. Status: 0x%X\n", (UINT32)km_slot_copy.command_id, km_slot_copy.request_id, km_slot_copy.process_id, status);
+            }
+            ZwClose(target_process_handle_thread); // Close the process handle
             break;
         }
         default:

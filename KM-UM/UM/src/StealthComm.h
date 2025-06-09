@@ -36,8 +36,8 @@ typedef long NTSTATUS;
 // Stealth Communication Protocol Definitions
 #define MAX_COMM_SLOTS 4
 // #define SIGNATURE_VALUE 0xDEADBEEFCAFEBABE // Unique signature for shared block - REMOVED for dynamic signature
-#define MAX_PARAM_SIZE 256
-#define MAX_OUTPUT_SIZE 256
+#define MAX_PARAM_SIZE 4096
+#define MAX_OUTPUT_SIZE 4096
 
 enum class CommCommand : uint32_t {
     REQUEST_NOP = 0,
@@ -48,6 +48,8 @@ enum class CommCommand : uint32_t {
     REQUEST_ALLOCATE_MEMORY,
     REQUEST_DISCONNECT, // Added for clean disconnect
     REQUEST_FREE_MEMORY, // Added for freeing memory
+    REQUEST_PROTECT_MEMORY, // Added for changing memory protection
+    REQUEST_CREATE_THREAD, // Added for remote thread creation
 };
 
 enum class SlotStatus : uint32_t {
@@ -180,5 +182,21 @@ uintptr_t AobScan(uint64_t target_pid, uintptr_t start_address, size_t scan_size
                   uint8_t* out_saved_bytes, size_t saved_bytes_size); // Returns 0 on failure, saved_bytes not currently filled
 uintptr_t AllocateMemory(uint64_t target_pid, size_t size, uintptr_t hint_address = 0); // Returns 0 on failure
 NTSTATUS FreeMemory(uint64_t target_pid, uintptr_t address, size_t size);
+
+// Modifies memory protection in the target process.
+NTSTATUS ProtectMemory(uint64_t target_pid, uintptr_t address, size_t size, uint32_t new_protection);
+
+// Creates a remote thread in the target process.
+// On success, p_thread_id will contain the Thread ID (HANDLE type).
+NTSTATUS CreateRemoteThread(uint64_t target_pid, uintptr_t start_address, uintptr_t argument, HANDLE* p_thread_id);
+
+// Requests the kernel driver to unload itself.
+NTSTATUS RequestDriverUnload();
+
+// Checks if StealthComm is initialized (e.g., driver handle is valid).
+bool IsInitialized();
+
+// Gets the dynamic symlink name used for communication.
+std::wstring GetActiveSymlinkName();
 
 } // namespace StealthComm

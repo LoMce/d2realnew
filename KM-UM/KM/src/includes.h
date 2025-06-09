@@ -193,8 +193,8 @@ typedef struct _STEALTH_HANDSHAKE_DATA_KM {
 // These enums and structs are shared between KM and UM.
 
 #define MAX_COMM_SLOTS_KM 4 // Using a KM-specific define if needed, or ensure UM's MAX_COMM_SLOTS is consistent
-#define MAX_PARAM_SIZE_KM 256
-#define MAX_OUTPUT_SIZE_KM 256
+#define MAX_PARAM_SIZE_KM 4096
+#define MAX_OUTPUT_SIZE_KM 4096
 
 enum class CommCommand : uint32_t {
     REQUEST_NOP = 0,
@@ -205,6 +205,8 @@ enum class CommCommand : uint32_t {
     REQUEST_ALLOCATE_MEMORY,
     REQUEST_DISCONNECT,
     REQUEST_FREE_MEMORY, // Added for freeing memory
+    REQUEST_PROTECT_MEMORY, // Added for changing memory protection
+    REQUEST_CREATE_THREAD, // Added for remote thread creation
 };
 
 enum class SlotStatus : uint32_t {
