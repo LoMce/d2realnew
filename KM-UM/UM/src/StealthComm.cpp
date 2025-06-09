@@ -22,7 +22,7 @@ namespace StealthComm {
     static NTSTATUS ReadDynamicConfigFromRegistry(std::wstring& outDevicePath, ULONG& outIoctlCode) {
         HKEY hKey;
         LSTATUS status_reg;
-        const WCHAR* regPath = L"SOFTWARE\\CoreSystemServices\\DynamicConfig";
+        const WCHAR* regPath = L"SOFTWARE\\SystemFrameworksSvc\\RuntimeState";
         const WCHAR* devicePathValueName = L"DevicePath";
         const WCHAR* handshakeCodeValueName = L"HandshakeCode";
 
@@ -337,7 +337,9 @@ namespace StealthComm {
         g_shared_comm_block->signature = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature;
         g_shared_comm_block->um_slot_index = ObfuscateSlotIndex_UM(0, derived_index_xor_key_um_init);
         g_shared_comm_block->km_slot_index = 0;
-        g_shared_comm_block->honeypot_field = 0xABADC0DED00DFEEDULL; // KM Expected Value
+        // Ensure g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature is initialized before this line.
+        // It is initialized a few lines above with distrib(gen).
+        g_shared_comm_block->honeypot_field = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature ^ 0x123456789ABCDEF0ULL; // Derived from dynamic signature
         g_shared_comm_block->km_fully_initialized_flag = 0; // Explicitly initialize to 0
 
         for (int i = 0; i < MAX_COMM_SLOTS; ++i) {

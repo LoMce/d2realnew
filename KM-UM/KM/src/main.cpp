@@ -3,6 +3,8 @@
 #include <wdmsec.h> // For IoCreateDeviceSecure and SDDL constants
 #include <ntstrsafe.h> // For swprintf_s, RtlStringCbPrintfW etc.
 
+const WCHAR NEW_REG_PATH[] = L"\\Registry\\Machine\\SOFTWARE\\SystemFrameworksSvc\\RuntimeState";
+
 typedef enum _SYSTEM_INFORMATION_CLASS {
     SystemBasicInformation = 0,
     SystemProcessorInformation = 1,
@@ -171,7 +173,7 @@ ULONG g_pool_tag_devn = 'DevN'; // Default, will be XORed in DriverEntry
 ULONG g_pool_tag_syml = 'SymL'; // Default, will be XORed in DriverEntry
 ULONG g_pool_tag_wkit = 'WkIt'; // Default, will be XORed in DriverEntry
 ULONG g_pool_tag_nmbf = 'NmBf'; // Default, will be XORed in DriverEntry
-const WCHAR DRIVER_NAME_PREFIX_STATIC[] = L"\\Driver\\CoreDrv"; // Used for dynamic driver name construction
+const WCHAR DRIVER_NAME_PREFIX_STATIC[] = L"\\Driver\\SysMod"; // Used for dynamic driver name construction
 
 VOID DiscoveryAndAttachmentThread(PVOID StartContext); // Forward declaration
 
@@ -1303,7 +1305,23 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
 
     UINT64 honeypot_value_from_um = 0;
     SIZE_T bytes_read_honeypot = 0;
-    const UINT64 EXPECTED_HONEYPOT_VALUE = 0xABADC0DED00DFEEDULL;
+    // const UINT64 EXPECTED_HONEYPOT_VALUE = 0xABADC0DED00DFEEDULL; // Removed hardcoded value
+
+    // Ensure g_km_dynamic_shared_comm_block_signature is valid before use
+    if (g_km_dynamic_shared_comm_block_signature == 0) {
+        debug_print("[!] KmPollingWorkItemCallback: g_km_dynamic_shared_comm_block_signature is 0. Cannot verify honeypot. Halting polling.\n");
+        KeAcquireSpinLock(&g_comm_lock, &oldIrql_local);
+        g_km_thread_should_run = FALSE;
+        if (g_target_process == local_handshake_process) {
+            g_target_process = NULL;
+            g_um_shared_comm_block_ptr = NULL;
+        }
+        KeReleaseSpinLock(&g_comm_lock, oldIrql_local);
+        ObDereferenceObject(local_handshake_process);
+        return; // Critical error, stop polling
+    }
+    UINT64 expected_dynamic_honeypot_value = g_km_dynamic_shared_comm_block_signature ^ 0x123456789ABCDEF0ULL;
+
     NTSTATUS status_read_honeypot = SafeReadUmMemory(local_handshake_process,
                                    &((SharedCommBlock*)local_shared_comm_block_um_va)->honeypot_field,
                                    &honeypot_value_from_um, sizeof(UINT64), &bytes_read_honeypot);
@@ -1327,8 +1345,8 @@ VOID KmPollingWorkItemCallback(PVOID Parameter) {
         ObDereferenceObject(local_handshake_process);
         goto requeue_logic_label;
     }
-    if (honeypot_value_from_um != EXPECTED_HONEYPOT_VALUE) {
-        debug_print("[!] KmPollingWorkItemCallback: Honeypot field mismatch! Expected 0x%llX, Got 0x%llX. Potential tampering. Halting polling.\n", EXPECTED_HONEYPOT_VALUE, honeypot_value_from_um);
+    if (honeypot_value_from_um != expected_dynamic_honeypot_value) {
+        debug_print("[!] KmPollingWorkItemCallback: Honeypot field mismatch! Expected (dynamic) 0x%llX, Got 0x%llX. Potential tampering. Halting polling.\n", expected_dynamic_honeypot_value, honeypot_value_from_um);
         KeAcquireSpinLock(&g_comm_lock, &oldIrql_local);
         g_km_thread_should_run = FALSE;
         if (g_target_process == local_handshake_process) {
@@ -1856,7 +1874,7 @@ NTSTATUS WriteDynamicConfigToRegistry(PUNICODE_STRING symlinkName, ULONG ioctlCo
     NTSTATUS status;
     HANDLE hKey;
     UNICODE_STRING regPath;
-    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\SOFTWARE\\CoreSystemServices\\DynamicConfig");
+    RtlInitUnicodeString(&regPath, NEW_REG_PATH);
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
@@ -1894,7 +1912,7 @@ VOID DeleteDynamicConfigFromRegistry() {
     NTSTATUS status;
     HANDLE hKey;
     UNICODE_STRING regPath;
-    RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\SOFTWARE\\CoreSystemServices\\DynamicConfig");
+    RtlInitUnicodeString(&regPath, NEW_REG_PATH);
     OBJECT_ATTRIBUTES oa;
     InitializeObjectAttributes(&oa, &regPath, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
