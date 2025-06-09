@@ -242,11 +242,13 @@ void UI::Render()
     int destinyWidth = destinyRect.right - destinyRect.left;
     int destinyHeight = destinyRect.bottom - destinyRect.top;
 
+#ifdef _DEBUG
     std::cout
         << "[Overlay-Create] destinyWindow=" << destinyWindow
         << " Pos=(" << destinyX << "," << destinyY << ")"
         << " Size=" << destinyWidth << "×" << destinyHeight
         << std::endl;
+#endif
     
     // Create overlay window class
     const WNDCLASSEXW wc = { 
@@ -366,6 +368,7 @@ void UI::Render()
                 SetWindowPos(hwnd, HWND_TOPMOST, currentX, currentY, currentWidth, currentHeight, 
                             SWP_NOACTIVATE/* | SWP_NOZORDER*/);
 
+#ifdef _DEBUG
                 RECT overlayRect;
                 if (GetWindowRect(hwnd, &overlayRect)) {
                     std::cout
@@ -377,6 +380,7 @@ void UI::Render()
                         << (overlayRect.bottom - overlayRect.top)
                         << std::endl;
                 }
+#endif
                 
                 lastDestinyRect = currentDestinyRect;
             }
@@ -417,7 +421,11 @@ void UI::Render()
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
-        Drawing::Poll(); // fix for keybinds not working
+        // Drawing::Poll() is called here to process all feature-related inputs and state updates.
+        // This includes polling for hotkey presses (e.g., Fly, AbilityCharge) and updating feature logic accordingly.
+        // Its regular execution in the main loop is crucial for the responsiveness of these features.
+        // Original comment: "fix for keybinds not working"
+        Drawing::Poll();
 
         if (overlayEnabled)
         {
@@ -434,6 +442,9 @@ void UI::Render()
 
         pSwapChain->Present(1, 0);
 
+        // Check if the main ImGui window (controlled by Drawing::bDraw) is still active.
+        // Drawing::isActive() will return false if the user has closed the window.
+        // If not active, break out of the render loop to allow the application/thread to terminate.
 #ifndef _WINDLL
         if (!Drawing::isActive())
             break;

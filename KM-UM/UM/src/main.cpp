@@ -119,6 +119,7 @@ int main() {
         #ifdef _DEBUG
         std::cout << "[+] Attempting AOB scan for KillauraInstruction within destiny2.exe..." << std::endl;
         #endif
+        // Step 1: Perform AOB (Array of Bytes) scan to find the target instruction address.
         KillauraInstruction = StealthComm::AobScan(pid, game_base_address, scan_region_size,
                                                    reinterpret_cast<const char*>(KillauraAOB), KillauraAOBMask,
                                                    nullptr, 0);
@@ -146,6 +147,8 @@ int main() {
         std::cout << "[+] KillauraInstruction found. Attempting to allocate memory for shellcode near 0x"
                   << std::hex << KillauraInstruction << std::dec << "..." << std::endl;
         #endif
+        // Step 2: Allocate executable memory in the target process for the shellcode (codecave).
+        // The KillauraInstruction address is passed as a hint for proximity.
         hookFunctionAddress = StealthComm::AllocateMemory(pid, 100, KillauraInstruction); // Allocate 100 bytes
         if (hookFunctionAddress != 0) {
             #ifdef _DEBUG
@@ -169,13 +172,17 @@ int main() {
         // original 5 bytes from KillauraInstruction (if needed for trampoline)
         // For a simple relative jump back:
         // jmp rel32 ; E9 DD CC BB AA
-        0xE9, 0x00, 0x00, 0x00, 0x00
+        0xE9, 0x00, 0x00, 0x00, 0x00 // Placeholder for the relative jump offset
     };
     const size_t original_instruction_len = 5; // Assuming the jump we overwrite is 5 bytes for KillauraInstruction
 
     if (hookFunctionAddress != 0 && KillauraInstruction != 0) {
-        uintptr_t returnAddress = KillauraInstruction + original_instruction_len; // Address after the original 5 bytes we'd overwrite for a hook
+        // Step 3: Construct the shellcode.
+        // Calculate the relative offset for the JMP instruction at the end of the shellcode
+        // to jump back to the original execution flow (KillauraInstruction + original_instruction_len).
+        uintptr_t returnAddress = KillauraInstruction + original_instruction_len;
         int32_t relJmpOffset = static_cast<int32_t>(returnAddress - (hookFunctionAddress + sizeof(shellcode)));
+        // Patch the calculated offset into the shellcode.
         memcpy(shellcode + sizeof(shellcode) - sizeof(int32_t), &relJmpOffset, sizeof(int32_t));
 
         #ifdef _DEBUG
@@ -185,13 +192,14 @@ int main() {
         #endif
 
         size_t bytes_written = 0;
+        // Step 4: Write the constructed shellcode to the allocated memory in the target process.
         if (StealthComm::WriteMemory(pid, hookFunctionAddress, shellcode, sizeof(shellcode), &bytes_written)) {
             if (bytes_written == sizeof(shellcode)) {
                 #ifdef _DEBUG
                 std::cout << "[+] StealthComm::WriteMemory: Shellcode written to allocated memory successfully!" << std::endl;
                 #endif
-                // Now, to actually hook, one would overwrite KillauraInstruction with a jump to hookFunctionAddress.
-                // This part is highly game/target specific and omitted for this general example.
+                // Step 5: (Commented out) Place the hook. This would involve overwriting the original
+                // instructions at KillauraInstruction with a JMP instruction to hookFunctionAddress.
                 // Example: uint8_t jmp_to_hook_shellcode[5] = { 0xE9, 0x00, 0x00, 0x00, 0x00 };
                 // int32_t rel_jmp_to_hook = static_cast<int32_t>(hookFunctionAddress - (KillauraInstruction + 5));
                 // memcpy(jmp_to_hook_shellcode + 1, &rel_jmp_to_hook, sizeof(int32_t));

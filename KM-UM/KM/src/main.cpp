@@ -41,7 +41,7 @@ typedef enum _SYSTEM_INFORMATION_CLASS {
     SystemPlugPlayBusInformation = 32,
     SystemDockInformation = 33,
     SystemPowerInformation = 34,
-    SystemProcessorSpeedInformation = 35,
+    SystemProcessorPerformanceInformation = 35,
     SystemCurrentTimeZoneInformation = 36,
     SystemLookasideInformation = 37
     // ... there are many more
@@ -177,14 +177,32 @@ UNICODE_STRING g_dynamic_driver_name_us; // Initialized in DriverEntry
 WCHAR g_dynamic_driver_name_buffer[128]; // Buffer for the dynamic driver name
 
 // Globals for dynamic pool tags (defined in includes.h as extern)
-ULONG g_pool_tag_devn = 'DevN'; // Default, will be XORed in DriverEntry
-ULONG g_pool_tag_syml = 'SymL'; // Default, will be XORed in DriverEntry
-ULONG g_pool_tag_wkit = 'WkIt'; // Default, will be XORed in DriverEntry
-ULONG g_pool_tag_nmbf = 'NmBf'; // Default, will be XORed in DriverEntry
+// Purpose: These tags are used to identify memory allocations made by this driver,
+// aiding in debugging and memory analysis. They are XORed with a random value at DriverEntry
+// to make them unique for each driver load, potentially hindering reverse engineering efforts
+// that rely on fixed pool tags.
+ULONG g_pool_tag_devn = 'DevN'; // Tag for device name buffers or related allocations.
+ULONG g_pool_tag_syml = 'SymL'; // Tag for symbolic link name buffers or related allocations.
+ULONG g_pool_tag_wkit = 'WkIt'; // Tag for work item allocations.
+ULONG g_pool_tag_nmbf = 'NmBf'; // Tag for general name buffers (e.g., module names).
 const WCHAR DRIVER_NAME_PREFIX_STATIC[] = L"\\Driver\\SysMod"; // Used for dynamic driver name construction
 
 VOID DiscoveryAndAttachmentThread(PVOID StartContext); // Forward declaration
 
+/**
+ * @brief Prepares the driver for unload by cleaning up resources and stopping activities.
+ *
+ * This function is invoked when the driver is requested to unload, either by the system
+ * or through a specific IOCTL request. Its primary responsibilities include:
+ * - Signaling and waiting for the `DiscoveryAndAttachmentThread` to terminate if it's running.
+ * - Stopping the `KmPollingWorkItemCallback` by setting `g_km_thread_should_run` to FALSE
+ *   and freeing the associated work item memory.
+ * - Clearing global pointers related to the user-mode process and shared communication blocks
+ *   (`g_target_process`, `g_um_shared_comm_block_ptr`, handshake data).
+ * - Dereferencing the target process object (`g_target_process`) to release the kernel's hold on it.
+ * This ensures that all driver-initiated activities are ceased, and resources are released
+ * gracefully, preventing system instability or resource leaks upon driver unload.
+ */
 static VOID PrepareForUnload() {
     debug_print("[+] PrepareForUnload: Preparing driver for unload sequence.\n");
     KIRQL oldIrql;
@@ -449,6 +467,33 @@ NTSTATUS FetchDynamicSignaturesFromProcess(PEPROCESS target_eprocess) {
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief Thread responsible for discovering and attaching to the target user-mode process.
+ *
+ * This thread performs the following key operations:
+ * 1. Waits for the `g_handshake_completed_event` to be signaled, which occurs after
+ *    the user-mode (UM) process sends the initial handshake IOCTL.
+ * 2. Retrieves the target process EPROCESS structure (referenced during handshake) and
+ *    the obfuscated pointer to the first structure in the UM pointer chain.
+ * 3. Calls `FetchDynamicSignaturesFromProcess` to locate a beacon pattern in the UM process,
+ *    read a `DynamicSignaturesRelay` structure, and de-obfuscate its members (dynamic
+ *    signatures and the session XOR key) using the `g_received_beacon_salt_km`.
+ * 4. Navigates the multi-level pointer chain in UM memory, de-obfuscating each pointer
+ *    using the now-established session XOR key (`g_km_dynamic_obfuscation_xor_key`).
+ * 5. Verifies the `head_signature` of the first structure in the chain against
+ *    `g_km_dynamic_head_signature`.
+ * 6. Reads the final `SharedCommBlock` pointer from the last structure and verifies its
+ *    `signature` field against `g_km_dynamic_shared_comm_block_signature`.
+ * 7. If all checks pass, it stores the UM virtual address of the `SharedCommBlock` in
+ *    `g_um_shared_comm_block_ptr` and the target EPROCESS in `g_target_process` (already referenced).
+ * 8. Sets `g_km_thread_should_run` to TRUE and queues the `KmPollingWorkItemCallback`
+ *    to begin periodic communication with the UM process.
+ * 9. In case of any failure (e.g., signature mismatch, memory read error, invalid data),
+ *    it performs cleanup (dereferences the target process, clears globals) and terminates itself.
+ * The thread relies on `g_obfuscated_ptr1_um_addr_via_handshake`, `g_received_um_verification_token`,
+ * `g_received_beacon_pattern_km`, and `g_received_beacon_salt_km` being populated by
+ * `HandshakeDeviceControl` before the event is signaled.
+ */
 VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     UNREFERENCED_PARAMETER(StartContext);
     debug_print("[+] DiscoveryAndAttachmentThread started.\n");
@@ -750,6 +795,33 @@ VOID DiscoveryAndAttachmentThread(PVOID StartContext) {
     debug_print("[+] DiscoveryAndAttachmentThread: Setup successful. Thread will exit (polling is now independent).\n");
 }
 
+/**
+ * @brief Handles IOCTL requests sent to the driver's handshake device object.
+ *
+ * This function serves as the dispatch routine for device control requests. Its primary roles are:
+ * 1. Handling the dynamic handshake IOCTL (`g_dynamic_handshake_ioctl_code`):
+ *    - Validates that the driver is not already attached to a user-mode (UM) process.
+ *    - Validates the input buffer size and probes the buffer for read access.
+ *    - Receives `STEALTH_HANDSHAKE_DATA_KM` from the UM application. This structure contains:
+ *      - `ObfuscatedPtrStruct1HeadUmAddress`: The UM virtual address of the first structure in a pointer chain,
+ *        already deobfuscated by the UM component using a pre-shared key (now the UM-generated dynamic XOR key).
+ *      - `VerificationToken`: A value provided by UM, used by KM as a bootstrap XOR key for initial deobfuscation
+ *        and potentially as part of further verification. This token is expected to be the UM-generated dynamic XOR key.
+ *      - `BeaconPattern`: A byte pattern that the KM will search for in the UM process memory to locate
+ *        the `DynamicSignaturesRelay` structure.
+ *      - `BeaconSalt`: A salt value used by UM to obfuscate the `DynamicSignaturesRelay` structure members
+ *        (except the beacon itself) and to salt the beacon pattern for AOB scanning.
+ *    - Stores these received values (`g_obfuscated_ptr1_um_addr_via_handshake`, `g_received_um_verification_token`,
+ *      `g_received_beacon_pattern_km`, `g_received_beacon_salt_km`) in global variables.
+ *    - Sets `g_target_process` to the EPROCESS structure of the calling UM process and takes a reference to it.
+ *    - Signals the `g_handshake_completed_event`, allowing `DiscoveryAndAttachmentThread` to proceed with
+ *      pointer chain navigation and full attachment.
+ * 2. Handling `IOCTL_REQUEST_UNLOAD_DRIVER`:
+ *    - Calls `PrepareForUnload()` to initiate graceful shutdown of driver activities.
+ *
+ * All other IOCTL codes result in `STATUS_INVALID_DEVICE_REQUEST`.
+ * The function completes the IRP with the appropriate status and information.
+ */
 NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     UNREFERENCED_PARAMETER(DeviceObject);
     PIO_STACK_LOCATION io_stack_location = IoGetCurrentIrpStackLocation(Irp);
@@ -768,7 +840,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             if (already_active) {
                 debug_print("[-] HandshakeDeviceControl: IOCTL_STEALTH_HANDSHAKE received but driver already active. Rejecting.\n");
                 status = STATUS_DEVICE_ALREADY_ATTACHED; // Or a more suitable error code
-                break;
+                goto complete_request_label; // Use goto for single exit point
             }
 
             // Get input buffer length and pointer
@@ -778,7 +850,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             // Use STEALTH_HANDSHAKE_DATA_KM from includes.h
             if (input_buffer_length < sizeof(STEALTH_HANDSHAKE_DATA_KM)) {
                 status = STATUS_BUFFER_TOO_SMALL;
-                break;
+                goto complete_request_label; // Use goto
             }
 
             // Probe the input buffer
@@ -789,9 +861,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             __except (EXCEPTION_EXECUTE_HANDLER) {
                 status = GetExceptionCode();
                 debug_print("[-] HandshakeDeviceControl: ProbeForRead failed with exception code 0x%X.\n", status);
-                // Skip further processing for this IOCTL if ProbeForRead fails
-                // The IRP will be completed with this status code later.
-                break;
+                goto complete_request_label; // Use goto
             }
 
             // Proceed only if ProbeForRead was successful (status is still STATUS_SUCCESS from the __try block perspective)
@@ -859,7 +929,6 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
                     }
                 }
             } // End of if(NT_SUCCESS(status)) from ProbeForRead
-            break;
         }
     } else if (io_control_code == IOCTL_REQUEST_UNLOAD_DRIVER) {
         debug_print("[+] HandshakeDeviceControl: IOCTL_REQUEST_UNLOAD_DRIVER received from PID %lu.\n", (ULONG)(ULONG_PTR)PsGetProcessId(callingProcess));
@@ -873,6 +942,7 @@ NTSTATUS HandshakeDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         debug_print("[-] HandshakeDeviceControl: Unknown IOCTL received: 0x%X\n", io_control_code);
     }
 
+complete_request_label: // Single exit point for IRP completion
     Irp->IoStatus.Status = status;
     Irp->IoStatus.Information = information;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -1479,6 +1549,36 @@ VOID ProcessSlotRequest(PVOID slot_um_va, PEPROCESS handshake_eprocess) {
     }
 }
 
+/**
+ * @brief Kernel work item callback for polling the SharedCommBlock in user mode.
+ *
+ * This function is executed periodically by a system worker thread. Its responsibilities include:
+ * 1. Checking `g_km_thread_should_run`: If FALSE, the polling stops.
+ * 2. Reading the `SharedCommBlock` from the user-mode (UM) address `g_um_shared_comm_block_ptr`
+ *    within the context of the `g_target_process`.
+ * 3. Verifying the `signature` field of the `SharedCommBlock` against `g_km_dynamic_shared_comm_block_signature`.
+ *    If it mismatch, polling stops, assuming potential tampering or process termination.
+ * 4. Verifying a `honeypot_field` in the `SharedCommBlock`. This field is expected to be a specific value
+ *    (derived from `g_km_dynamic_shared_comm_block_signature`) set by the UM component. If it mismatches,
+ *    polling stops, indicating potential tampering.
+ * 5. Reading the `km_slot_index` (obfuscated) from the `SharedCommBlock`. This index indicates which
+ *    `CommunicationSlot` the KM should check next.
+ * 6. Deobfuscating the `km_slot_index` using a key derived from `g_km_dynamic_shared_comm_block_signature`.
+ * 7. Reading the `status` field of the `CommunicationSlot` at the deobfuscated index.
+ * 8. If the slot status is `UM_REQUEST_PENDING`:
+ *    - Calls `ProcessSlotRequest` to handle the command from UM. This involves decrypting
+ *      parameters, executing the command, encrypting the output, and updating the slot status.
+ *    - Increments the `km_slot_index`, obfuscates it, and writes it back to the `SharedCommBlock` in UM,
+ *      signaling to UM which slot the KM will check next.
+ * 9. If no request was processed, increments `g_consecutive_idle_polls`.
+ *10. Calculates an adaptive delay for the next poll based on whether a request was processed
+ *    and the number of consecutive idle polls, adding jitter.
+ *11. Re-queues itself (`g_pPollingWorkItem`) for execution after the calculated delay,
+ *    if `g_km_thread_should_run` is still TRUE.
+ *12. Handles read failures from UM (e.g., if the UM process terminates). After a set number
+ *    of consecutive failures, it assumes the UM process is gone and stops polling by setting
+ *    `g_km_thread_should_run` to FALSE and cleaning up `g_target_process` and `g_um_shared_comm_block_ptr`.
+ */
 VOID KmPollingWorkItemCallback(PVOID Parameter) {
     UNREFERENCED_PARAMETER(Parameter);
 
@@ -1887,6 +1987,24 @@ NTSTATUS driver_main(PDRIVER_OBJECT driver_object, PUNICODE_STRING registry_path
 
     // Note: Dynamic Driver Name and Pool Tags are initialized in DriverEntry now.
     // Dynamic IOCTL, Device Name, and Symlink Name are also initialized in DriverEntry before this function is called.
+
+    // The generation of dynamic driver object names (g_dynamic_driver_name_us),
+    // device names (g_dynamic_device_name_us), symbolic links (g_dynamic_symlink_name_us),
+    // and IOCTL codes (g_dynamic_handshake_ioctl_code) happens in DriverEntry before this function.
+    // These dynamic elements are crucial for making the driver less predictable and harder to detect.
+    //
+    // Registry Persistence:
+    // - `WriteDynamicConfigToRegistry` is called to store the generated symbolic link name and
+    //   the dynamic IOCTL code into the system registry. This allows the user-mode component
+    //   to discover these dynamic values and establish communication with the driver.
+    // - `DeleteDynamicConfigFromRegistry` is called during driver unload to remove these
+    //   entries, ensuring no stale configuration remains in the registry.
+    //
+    // Dynamic Pool Tags:
+    // - Pool tags like `g_pool_tag_devn`, `g_pool_tag_syml`, etc., are also dynamically generated
+    //   in DriverEntry by XORing default tag values with a random number. This helps in
+    //   camouflaging memory allocations made by the driver, making it harder for security
+    //   software or analysts to identify driver-specific memory blocks based on fixed pool tags.
 
     UNICODE_STRING sddl_admin_system_all;
     RtlInitUnicodeString(&sddl_admin_system_all, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
