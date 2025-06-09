@@ -11,6 +11,8 @@
 extern std::vector<std::string> g_logMessages;
 extern std::mutex g_logMutex;
 
+#ifdef _DEBUG
+
 // Function to add a pre-formatted message to the log
 inline void AddLogEntry(const std::string& entry) {
     std::lock_guard<std::mutex> lock(g_logMutex);
@@ -47,3 +49,13 @@ inline void LogMessageF(const char* format, Args ... args) {
     std::snprintf(buf.data(), size + 1, format, args ...);
     LogMessage(std::string(buf.data(), buf.data() + size));
 }
+
+#else // Release configuration (_DEBUG is not defined)
+
+// Define empty inline functions to compile out logging calls
+inline void AddLogEntry(const std::string&) { /* Do nothing */ }
+inline void LogMessage(const std::string&) { /* Do nothing */ }
+template<typename ... Args>
+inline void LogMessageF(const char*, Args ...) { /* Do nothing */ }
+
+#endif // _DEBUG

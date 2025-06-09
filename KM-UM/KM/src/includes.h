@@ -3,6 +3,12 @@
 #include <windef.h>
 #include <stdint.h>
 
+#if DBG // DBG is commonly used for kernel debug builds
+#define debug_print(format, ...) DbgPrint(format, __VA_ARGS__)
+#else
+#define debug_print(format, ...) // Expands to nothing in non-DBG builds
+#endif
+
 // New IOCTL for driver unload
 // Using METHOD_NEITHER and FILE_ANY_ACCESS is typical for simple trigger IOCTLs
 // that don't transfer data and can be called by a privileged user.
