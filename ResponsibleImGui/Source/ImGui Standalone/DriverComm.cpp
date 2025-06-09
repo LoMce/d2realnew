@@ -272,60 +272,71 @@ namespace DriverComm {
     // This must match the KM definition: CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_NEITHER, FILE_ANY_ACCESS)
     // FILE_DEVICE_UNKNOWN = 0x22, METHOD_NEITHER = 3, FILE_ANY_ACCESS = 0
     // Value = (0x22 << 16) | (0 << 14) | (0x902 << 2) | 3 = 0x00220000 | 0x00000000 | 0x00002408 | 0x00000003 = 0x22240B
-    #define UM_IOCTL_REQUEST_UNLOAD_DRIVER 0x22240B
+    #define UM_IOCTL_REQUEST_UNLOAD_DRIVER 0x22240B // This IOCTL code is fixed and known.
+
+    NTSTATUS protect_memory_ex(DWORD pid, uintptr_t address, SIZE_T size, uint32_t new_protection) {
+        DWORD target_pid_to_use = (pid != 0) ? pid : DriverComm::g_pid;
+        if (target_pid_to_use == 0) {
+            LogMessage("[-] DriverComm::protect_memory_ex: PID not set and not provided.");
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (address == 0 || size == 0) {
+            LogMessage("[-] DriverComm::protect_memory_ex: Invalid address or size.");
+            return STATUS_INVALID_PARAMETER;
+        }
+        // Call the corresponding StealthComm function
+        NTSTATUS status = StealthComm::ProtectMemory(static_cast<uint64_t>(target_pid_to_use), address, size, new_protection);
+        // StealthComm::ProtectMemory is expected to log its own detailed errors.
+        if (!NT_SUCCESS(status)) {
+            LogMessageF("[-] DriverComm::protect_memory_ex: Failed for PID %lu, address 0x%p, size %zu. Status: 0x%lX", target_pid_to_use, (void*)address, size, status);
+        }
+        return status;
+    }
+
+    NTSTATUS create_remote_thread_ex(DWORD pid, uintptr_t start_address, uintptr_t argument, HANDLE* p_thread_id) {
+        if (!p_thread_id) {
+            return STATUS_INVALID_PARAMETER_4; // Output parameter is invalid
+        }
+        *p_thread_id = NULL; // Initialize output
+
+        DWORD target_pid_to_use = (pid != 0) ? pid : DriverComm::g_pid;
+        if (target_pid_to_use == 0) {
+            LogMessage("[-] DriverComm::create_remote_thread_ex: PID not set and not provided.");
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (start_address == 0) {
+            LogMessage("[-] DriverComm::create_remote_thread_ex: Start address cannot be zero.");
+            return STATUS_INVALID_PARAMETER_2; // Start address is param 2 conceptually
+        }
+
+        NTSTATUS status = StealthComm::CreateRemoteThread(static_cast<uint64_t>(target_pid_to_use), start_address, argument, p_thread_id);
+        // StealthComm::CreateRemoteThread is expected to log its own detailed errors.
+        if (!NT_SUCCESS(status)) {
+            LogMessageF("[-] DriverComm::create_remote_thread_ex: Failed for PID %lu, start_address 0x%p. Status: 0x%lX", target_pid_to_use, (void*)start_address, status);
+        } else {
+            LogMessageF("[+] DriverComm::create_remote_thread_ex: Successfully created remote thread for PID %lu. TID: %p", target_pid_to_use, *p_thread_id);
+        }
+        return status;
+    }
 
     NTSTATUS RequestDriverUnload() {
-        LogMessage("[+] DriverComm: Attempting to request driver unload.");
-        HANDLE hDevice = CreateFileW(
-            StealthComm::HANDSHAKE_DEVICE_SYMLINK_NAME_UM, // Defined in StealthComm.h
-            GENERIC_WRITE, // May not strictly need write for METHOD_NEITHER, but GENERIC_READ|GENERIC_WRITE is common. GENERIC_WRITE for safety.
-            0,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr
-        );
-
-        if (hDevice == INVALID_HANDLE_VALUE) {
-            DWORD error = GetLastError();
-            LogMessageF("[-] DriverComm: Failed to open handle to KM handshake device. Error: %lu", error);
-            // Convert Win32 error to NTSTATUS
-            if (error == ERROR_ACCESS_DENIED) return STATUS_ACCESS_DENIED; // 0xC0000022
-            if (error == ERROR_FILE_NOT_FOUND) return STATUS_OBJECT_NAME_NOT_FOUND; // 0xC0000034
-            return STATUS_UNSUCCESSFUL; // 0xC0000001
+        // Ensure StealthComm is initialized (which implies driver handle is open)
+        if (!StealthComm::IsInitialized()) {
+             LogMessage("[-] DriverComm: Attempted to unload driver but StealthComm is not initialized.");
+             return STATUS_DEVICE_NOT_CONNECTED;
         }
 
-        LogMessage("[+] DriverComm: Device handle obtained for unload IOCTL.");
-        DWORD bytesReturned = 0;
-        NTSTATUS status = STATUS_UNSUCCESSFUL;
+        LogMessage("[+] DriverComm: Requesting driver unload via StealthComm...");
+        NTSTATUS status = StealthComm::RequestDriverUnload(); // This now uses the stored handle
 
-        BOOL bResult = DeviceIoControl(
-            hDevice,
-            UM_IOCTL_REQUEST_UNLOAD_DRIVER,
-            nullptr,
-            0,
-            nullptr,
-            0,
-            &bytesReturned,
-            nullptr
-        );
-
-        if (bResult) {
-            LogMessage("[+] DriverComm: IOCTL_REQUEST_UNLOAD_DRIVER sent successfully to KM.");
-            status = STATUS_SUCCESS;
+        if (NT_SUCCESS(status)) {
+            LogMessage("[+] DriverComm: Driver unload request successful via StealthComm. Communication should cease.");
+            // g_pid might be reset here or in a higher level UI logic if needed.
+            // StealthComm::ShutdownStealthComm() will be called by the main application logic,
+            // which will also clear its own state including the now-invalidated handle.
         } else {
-            DWORD error = GetLastError();
-            LogMessageF("[-] DriverComm: DeviceIoControl for IOCTL_REQUEST_UNLOAD_DRIVER failed. Error: %lu", error);
-            // Try to map common errors, otherwise return generic failure.
-            // Note: The actual NTSTATUS of the IRP completion in kernel isn't directly returned by DeviceIoControl's boolean.
-            // This status primarily reflects the DeviceIoControl call itself.
-            if (error == ERROR_ACCESS_DENIED) status = STATUS_ACCESS_DENIED;
-            else if (error == ERROR_INVALID_HANDLE) status = STATUS_INVALID_HANDLE;
-            // Add more mappings if specific errors are expected.
-            else status = STATUS_UNSUCCESSFUL;
+            LogMessageF("[-] DriverComm: Driver unload request via StealthComm failed. Status: 0x%lX", status);
         }
-
-        CloseHandle(hDevice);
         return status;
     }
 

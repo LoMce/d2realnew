@@ -11,56 +11,123 @@
 #include "Logging.h" // Assuming Logging.h is accessible
 #include <winreg.h> // For registry operations
 #include <string>   // For std::wstring
+#include <vector>   // For std::vector in ReadDynamicConfigFromRegistry
 
 // Define global variables within the StealthComm namespace
 namespace StealthComm {
 
-    // Helper function to convert NTSTATUS to a more generic error for InitializeStealthComm if needed,
-    // or directly return NTSTATUS. For now, InitializeStealthComm returns NTSTATUS.
-    // #define STATUS_REGISTRY_IO_FAILED ((NTSTATUS)0xC0000218L) // Example, could use existing ones too
+    // Registry XOR key (must match KM)
+    const BYTE REG_XOR_KEY[] = {0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x90};
+    const UINT64 NEW_HONEYPOT_XOR_CONSTANT_UM = 0xFEDCBA9876543210ULL;
 
-    static NTSTATUS ReadDynamicConfigFromRegistry(std::wstring& outDevicePath, ULONG& outIoctlCode) {
-        HKEY hKey;
-        LSTATUS status_reg;
-        const WCHAR* regPath = L"SOFTWARE\\SystemFrameworksSvc\\RuntimeState";
-        const WCHAR* devicePathValueName = L"DevicePath";
-        const WCHAR* handshakeCodeValueName = L"HandshakeCode";
 
-        status_reg = RegOpenKeyExW(HKEY_LOCAL_MACHINE, regPath, 0, KEY_READ, &hKey);
-        if (status_reg != ERROR_SUCCESS) {
-            LogMessageF("[-] ReadDynamicConfigFromRegistry: Failed to open registry key '%s'. Error: %ld", regPath, status_reg);
-            // Map common Reg errors to NTSTATUS if desired, or return a generic one.
-            // For example, ERROR_FILE_NOT_FOUND -> STATUS_OBJECT_NAME_NOT_FOUND
-            return (status_reg == ERROR_FILE_NOT_FOUND) ? 0xC0000034L : 0xC0000225L; // STATUS_OBJECT_NAME_NOT_FOUND / STATUS_UNSUCCESSFUL
+    // Helper function for XOR encryption/decryption (must match KM)
+    static void XorEncryptDecrypt(PBYTE data, ULONG dataLength, const BYTE* key, ULONG keyLength) {
+        if (!data || dataLength == 0 || !key || keyLength == 0) return;
+        for (ULONG i = 0; i < dataLength; ++i) {
+            data[i] ^= key[i % keyLength];
         }
-
-        WCHAR devicePathBuffer[256]; // Max path length for device paths is usually sufficient
-        DWORD bufferSize = sizeof(devicePathBuffer);
-        status_reg = RegQueryValueExW(hKey, devicePathValueName, nullptr, nullptr, (LPBYTE)devicePathBuffer, &bufferSize);
-        if (status_reg != ERROR_SUCCESS) {
-            LogMessageF("[-] ReadDynamicConfigFromRegistry: Failed to read '%s' value. Error: %ld", devicePathValueName, status_reg);
-            RegCloseKey(hKey);
-            return 0xC0000225L; // STATUS_UNSUCCESSFUL or more specific
-        }
-        // Ensure null termination, though RegQueryValueExW for REG_SZ should handle it if buffer is adequate.
-        devicePathBuffer[(bufferSize / sizeof(WCHAR)) - 1] = L'\0';
-        outDevicePath = devicePathBuffer;
-
-        DWORD ioctlCodeBuffer = 0;
-        bufferSize = sizeof(ioctlCodeBuffer);
-        status_reg = RegQueryValueExW(hKey, handshakeCodeValueName, nullptr, nullptr, (LPBYTE)&ioctlCodeBuffer, &bufferSize);
-        if (status_reg != ERROR_SUCCESS || bufferSize != sizeof(DWORD)) {
-            LogMessageF("[-] ReadDynamicConfigFromRegistry: Failed to read '%s' value or size mismatch. Error: %ld, Size: %lu", handshakeCodeValueName, status_reg, bufferSize);
-            RegCloseKey(hKey);
-            return 0xC0000225L; // STATUS_UNSUCCESSFUL or more specific
-        }
-        outIoctlCode = ioctlCodeBuffer;
-
-        RegCloseKey(hKey);
-        LogMessageF("[+] ReadDynamicConfigFromRegistry: Successfully read DevicePath: '%ls', HandshakeCode: 0x%lX", outDevicePath.c_str(), outIoctlCode);
-        return STATUS_SUCCESS;
     }
 
+    // Updated function to find dynamic config in registry and decrypt values
+    static NTSTATUS ReadDynamicConfigFromRegistry(std::wstring& outDevicePath, ULONG& outIoctlCode) {
+        const WCHAR* UM_REG_BASE_PATHS[] = {
+            L"SOFTWARE\\SystemFrameworksSvc",
+            L"SOFTWARE\\Windows\\CurrentVersion\\ShellSvc",
+            L"SYSTEM\\ControlSet001\\Services\\SysUtils",
+            L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Notify"
+        };
+        const WCHAR* encryptedDevicePathValueName = L"EncryptedDevicePath";
+        const WCHAR* encryptedHandshakeCodeValueName = L"EncryptedHandshakeCode";
+
+        HKEY hBaseKey;
+        LSTATUS status_reg;
+        bool found_config = false;
+
+        for (const WCHAR* basePath : UM_REG_BASE_PATHS) {
+            status_reg = RegOpenKeyExW(HKEY_LOCAL_MACHINE, basePath, 0, KEY_READ, &hBaseKey);
+            if (status_reg != ERROR_SUCCESS) {
+                LogMessageF("[-] ReadDynamicConfig: Failed to open base registry key '%s'. Error: %ld. Trying next.", basePath, status_reg);
+                continue;
+            }
+
+            WCHAR subKeyName[256];
+            DWORD subKeyNameSize;
+            for (DWORD i = 0; ; ++i) {
+                subKeyNameSize = sizeof(subKeyName) / sizeof(WCHAR);
+                status_reg = RegEnumKeyExW(hBaseKey, i, subKeyName, &subKeyNameSize, nullptr, nullptr, nullptr, nullptr);
+                if (status_reg == ERROR_NO_MORE_ITEMS) break;
+                if (status_reg != ERROR_SUCCESS) continue;
+
+                // Check if subKeyName looks like a GUID: {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX} (length 38)
+                if (subKeyNameSize == 38 && subKeyName[0] == L'{' && subKeyName[subKeyNameSize - 1] == L'}') {
+                    LogMessageF("[+] ReadDynamicConfig: Found potential GUID subkey: %s\\%s", basePath, subKeyName);
+                    std::wstring fullGuidKeyPath = std::wstring(basePath) + L"\\" + subKeyName;
+                    HKEY hGuidKey;
+                    status_reg = RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullGuidKeyPath.c_str(), 0, KEY_READ, &hGuidKey);
+                    if (status_reg != ERROR_SUCCESS) {
+                        LogMessageF("[-] ReadDynamicConfig: Failed to open GUID subkey '%s'. Error: %ld", fullGuidKeyPath.c_str(), status_reg);
+                        continue;
+                    }
+
+                    std::vector<BYTE> encryptedDevicePathBuffer(MAX_PATH * sizeof(WCHAR)); // Max path for symlink
+                    DWORD devicePathBufferSize = static_cast<DWORD>(encryptedDevicePathBuffer.size());
+                    status_reg = RegQueryValueExW(hGuidKey, encryptedDevicePathValueName, nullptr, nullptr, encryptedDevicePathBuffer.data(), &devicePathBufferSize);
+                    if (status_reg != ERROR_SUCCESS) {
+                        LogMessageF("[-] ReadDynamicConfig: Failed to read '%s' from '%s'. Error: %ld", encryptedDevicePathValueName, fullGuidKeyPath.c_str(), status_reg);
+                        RegCloseKey(hGuidKey);
+                        continue;
+                    }
+                    XorEncryptDecrypt(encryptedDevicePathBuffer.data(), devicePathBufferSize, REG_XOR_KEY, sizeof(REG_XOR_KEY));
+                    // Ensure null termination for WCHAR string after decryption
+                    if (devicePathBufferSize > 0 && (devicePathBufferSize % sizeof(WCHAR) == 0)) {
+                         // Add null terminator if space allows and not already last char
+                        if (encryptedDevicePathBuffer[devicePathBufferSize - sizeof(WCHAR)] != L'\0' && encryptedDevicePathBuffer[devicePathBufferSize - sizeof(WCHAR)+1] != L'\0' ) {
+                            if (devicePathBufferSize < encryptedDevicePathBuffer.size()) {
+                                encryptedDevicePathBuffer[devicePathBufferSize] = L'\0'; // Add null wchar
+                                encryptedDevicePathBuffer[devicePathBufferSize+1] = L'\0';
+                            } else {
+                                // No space for null terminator, this is an issue.
+                                LogMessageF("[-] ReadDynamicConfig: Decrypted DevicePath has no space for null terminator. Size: %lu", devicePathBufferSize);
+                                RegCloseKey(hGuidKey);
+                                continue;
+                            }
+                        }
+                        outDevicePath = std::wstring(reinterpret_cast<WCHAR*>(encryptedDevicePathBuffer.data()));
+                    } else {
+                         LogMessageF("[-] ReadDynamicConfig: Invalid size for decrypted DevicePath: %lu", devicePathBufferSize);
+                         RegCloseKey(hGuidKey);
+                         continue;
+                    }
+
+
+                    BYTE encryptedIoctlCodeBuffer[sizeof(ULONG)];
+                    DWORD ioctlCodeBufferSize = sizeof(encryptedIoctlCodeBuffer);
+                    status_reg = RegQueryValueExW(hGuidKey, encryptedHandshakeCodeValueName, nullptr, nullptr, encryptedIoctlCodeBuffer, &ioctlCodeBufferSize);
+                    if (status_reg != ERROR_SUCCESS || ioctlCodeBufferSize != sizeof(ULONG)) {
+                        LogMessageF("[-] ReadDynamicConfig: Failed to read '%s' or size mismatch from '%s'. Error: %ld, Size: %lu", encryptedHandshakeCodeValueName, fullGuidKeyPath.c_str(), status_reg, ioctlCodeBufferSize);
+                        RegCloseKey(hGuidKey);
+                        continue;
+                    }
+                    XorEncryptDecrypt(encryptedIoctlCodeBuffer, ioctlCodeBufferSize, REG_XOR_KEY, sizeof(REG_XOR_KEY));
+                    memcpy(&outIoctlCode, encryptedIoctlCodeBuffer, sizeof(ULONG));
+
+                    RegCloseKey(hGuidKey);
+                    found_config = true;
+                    LogMessageF("[+] ReadDynamicConfig: Successfully decrypted DevicePath: '%ls', HandshakeCode: 0x%lX from %s", outDevicePath.c_str(), outIoctlCode, fullGuidKeyPath.c_str());
+                    break; // Found and processed config
+                }
+            }
+            RegCloseKey(hBaseKey);
+            if (found_config) break;
+        }
+
+        if (!found_config) {
+            LogMessage("[-] ReadDynamicConfigFromRegistry: Failed to find or read dynamic configuration from any known registry path.");
+            return 0xC0000034L; // STATUS_OBJECT_NAME_NOT_FOUND
+        }
+        return STATUS_SUCCESS;
+    }
 
     // --- START: Slot Index Obfuscation/De-obfuscation Utility (UM) ---
     static uint32_t ObfuscateSlotIndex_UM(uint32_t index, uint32_t key) {
@@ -245,6 +312,20 @@ namespace StealthComm {
     PtrStruct3_UM* g_ptr_struct3_um = nullptr;
     PtrStruct4_UM* g_ptr_struct4_um = nullptr;
 
+    static HANDLE g_h_driver_handle = INVALID_HANDLE_VALUE;
+    static std::wstring g_active_symlink_name;
+    static ULONG g_active_ioctl_handshake_code = 0;
+
+
+    bool IsInitialized() {
+        return g_h_driver_handle != INVALID_HANDLE_VALUE && g_h_driver_handle != nullptr && g_shared_comm_block != nullptr;
+    }
+
+    std::wstring GetActiveSymlinkName() {
+        return g_active_symlink_name;
+    }
+
+
     // ... (Serialization functions - UNCHANGED) ...
     static void Serialize_uint64(uint8_t* dest, uint64_t val) {
         memcpy(dest, &val, sizeof(uint64_t));
@@ -339,7 +420,20 @@ namespace StealthComm {
         g_shared_comm_block->km_slot_index = 0;
         // Ensure g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature is initialized before this line.
         // It is initialized a few lines above with distrib(gen).
-        g_shared_comm_block->honeypot_field = g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature ^ 0x123456789ABCDEF0ULL; // Derived from dynamic signature
+        // Update honeypot calculation
+        if (g_dynamic_signatures_relay_data.dynamic_shared_comm_block_signature == 0 || g_dynamic_signatures_relay_data.dynamic_head_signature == 0) {
+             LogMessage("[-] InitializeStealthComm: Critical - dynamic signatures are zero before honeypot calculation.");
+             VirtualFree(g_shared_comm_block, 0, MEM_RELEASE);
+             g_shared_comm_block = nullptr;
+             // Free other PtrStructs if allocated
+             if(g_ptr_struct4_um) VirtualFree(g_ptr_struct4_um, 0, MEM_RELEASE);
+             if(g_ptr_struct3_um) VirtualFree(g_ptr_struct3_um, 0, MEM_RELEASE);
+             if(g_ptr_struct2_um) VirtualFree(g_ptr_struct2_um, 0, MEM_RELEASE);
+             if(g_ptr_struct1_head_um) VirtualFree(g_ptr_struct1_head_um, 0, MEM_RELEASE);
+             g_ptr_struct1_head_um = nullptr; g_ptr_struct2_um = nullptr; g_ptr_struct3_um = nullptr; g_ptr_struct4_um = nullptr;
+             return STATUS_INTERNAL_ERROR;
+        }
+        g_shared_comm_block->honeypot_field = g_shared_comm_block->signature ^ g_dynamic_signatures_relay_data.dynamic_head_signature ^ NEW_HONEYPOT_XOR_CONSTANT_UM;
         g_shared_comm_block->km_fully_initialized_flag = 0; // Explicitly initialize to 0
 
         for (int i = 0; i < MAX_COMM_SLOTS; ++i) {
@@ -373,15 +467,22 @@ namespace StealthComm {
         g_ptr_struct4_um->obfuscation_value1 = (uint64_t)(g_ptr_struct4_um->data_block) ^ g_dynamic_signatures_relay_data.dynamic_obfuscation_xor_key;
 
         // Use dynamicDevicePath from registry
-        HANDLE hDevice = CreateFileW(
-            dynamicDevicePath.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
+        // Store the dynamic path and IOCTL code globally if successful so far
+        g_active_symlink_name = dynamicDevicePath;
+        g_active_ioctl_handshake_code = dynamicIoctlCode;
 
-        if (hDevice == INVALID_HANDLE_VALUE) {
-            LogMessageF("[-] InitializeStealthComm: Failed to open handle to KM handshake device using dynamic path '%ls'. Error: %lu", dynamicDevicePath.c_str(), GetLastError());
-            ShutdownStealthComm();
-            // Map GetLastError() to NTSTATUS if needed, e.g., HRESULT_FROM_WIN32(GetLastError())
-            return 0xC000003BL; // STATUS_OBJECT_PATH_NOT_FOUND or similar
+        g_h_driver_handle = CreateFileW(
+            g_active_symlink_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
+
+        if (g_h_driver_handle == INVALID_HANDLE_VALUE) {
+            LogMessageF("[-] InitializeStealthComm: Failed to open handle to KM handshake device using dynamic path '%ls'. Error: %lu", g_active_symlink_name.c_str(), GetLastError());
+            g_active_symlink_name.clear(); // Clear on failure
+            g_active_ioctl_handshake_code = 0;
+            ShutdownStealthComm(); // Full cleanup
+            return 0xC000003BL;
         }
+        LogMessageF("[+] InitializeStealthComm: Successfully opened persistent handle to driver: %p", g_h_driver_handle);
+
 
         STEALTH_HANDSHAKE_DATA_UM handshakeData;
         handshakeData.ObfuscatedPtrStruct1HeadUmAddress = (PVOID)g_ptr_struct1_head_um;
@@ -415,14 +516,18 @@ namespace StealthComm {
 
         DWORD bytesReturned = 0;
         BOOL success = DeviceIoControl(
-            hDevice, dynamicIoctlCode, &handshakeData, sizeof(STEALTH_HANDSHAKE_DATA_UM), // Use dynamic IOCTL
+            g_h_driver_handle, g_active_ioctl_handshake_code, &handshakeData, sizeof(STEALTH_HANDSHAKE_DATA_UM),
             nullptr, 0, &bytesReturned, nullptr );
-        CloseHandle(hDevice);
+        // Do NOT close g_h_driver_handle here; it's now persistent. It will be closed in ShutdownStealthComm.
 
         if (!success) {
             LogMessageF("[-] InitializeStealthComm: DeviceIoControl for handshake failed. Error: %lu", GetLastError());
-            ShutdownStealthComm();
-            return STATUS_IO_DEVICE_ERROR; // Or a more general error
+            CloseHandle(g_h_driver_handle); // Close if handshake failed
+            g_h_driver_handle = INVALID_HANDLE_VALUE;
+            g_active_symlink_name.clear();
+            g_active_ioctl_handshake_code = 0;
+            ShutdownStealthComm(); // Full cleanup of other resources
+            return STATUS_IO_DEVICE_ERROR;
         }
 
         // Poll for KM ready flag
@@ -444,15 +549,41 @@ namespace StealthComm {
 
         if (!km_ready) {
             LogMessage("[-] InitializeStealthComm: Timed out waiting for KM to set km_fully_initialized_flag.");
-            // Consider if a disconnect IOCTL should be sent here if one existed for aborting setup.
-            // For now, just shut down UM side.
-            ShutdownStealthComm(); // Clean up UM resources
+            CloseHandle(g_h_driver_handle); // Close on timeout
+            g_h_driver_handle = INVALID_HANDLE_VALUE;
+            g_active_symlink_name.clear();
+            g_active_ioctl_handshake_code = 0;
+            ShutdownStealthComm();
             return STATUS_TIMEOUT;
         }
 
         LogMessage("[+] InitializeStealthComm: KM ready signal received. StealthComm fully initialized.");
         return STATUS_SUCCESS;
     }
+
+
+    void ShutdownStealthComm() {
+        LogMessage("[+] ShutdownStealthComm: Shutting down StealthComm.");
+        // Send disconnect command to KM if a mechanism exists (e.g. specific IOCTL or a slot command)
+        // For now, this is not implemented here but could be added.
+
+        if (g_ptr_struct1_head_um) { VirtualFree(g_ptr_struct1_head_um, 0, MEM_RELEASE); g_ptr_struct1_head_um = nullptr; }
+        if (g_ptr_struct2_um) { VirtualFree(g_ptr_struct2_um, 0, MEM_RELEASE); g_ptr_struct2_um = nullptr; }
+        if (g_ptr_struct3_um) { VirtualFree(g_ptr_struct3_um, 0, MEM_RELEASE); g_ptr_struct3_um = nullptr; }
+        if (g_ptr_struct4_um) { VirtualFree(g_ptr_struct4_um, 0, MEM_RELEASE); g_ptr_struct4_um = nullptr; }
+        if (g_shared_comm_block) { VirtualFree(g_shared_comm_block, 0, MEM_RELEASE); g_shared_comm_block = nullptr; }
+
+        if (g_h_driver_handle != INVALID_HANDLE_VALUE && g_h_driver_handle != nullptr) {
+            LogMessageF("[+] ShutdownStealthComm: Closing driver handle %p.", g_h_driver_handle);
+            CloseHandle(g_h_driver_handle);
+            g_h_driver_handle = INVALID_HANDLE_VALUE;
+        }
+        g_active_symlink_name.clear();
+        g_active_ioctl_handshake_code = 0;
+        g_next_request_id = 1; // Reset request ID for potential re-initialization
+        LogMessage("[+] ShutdownStealthComm: StealthComm shutdown complete.");
+    }
+
 
     // The bool SubmitRequestAndWait has been removed.
 
@@ -897,6 +1028,111 @@ namespace StealthComm {
              LogMessageF("[+] FreeMemory: Successfully requested KM to free memory at 0x%p", (void*)address);
         }
         return status;
+    }
+
+    NTSTATUS ProtectMemory(uint64_t target_pid, uintptr_t address, size_t size, uint32_t new_protection) {
+        if (address == 0 || size == 0) {
+            LogMessage("[-] ProtectMemory: Invalid address or size.");
+            return STATUS_INVALID_PARAMETER;
+        }
+        uint8_t params[sizeof(uintptr_t) + sizeof(size_t) + sizeof(uint32_t)];
+        uint32_t current_offset = 0;
+
+        uint64_t p_address = static_cast<uint64_t>(address);
+        uint64_t p_size = static_cast<uint64_t>(size);
+        // new_protection is already uint32_t
+
+        memcpy(params + current_offset, &p_address, sizeof(p_address));
+        current_offset += sizeof(p_address);
+        memcpy(params + current_offset, &p_size, sizeof(p_size));
+        current_offset += sizeof(p_size);
+        memcpy(params + current_offset, &new_protection, sizeof(new_protection));
+        current_offset += sizeof(new_protection);
+
+        uint32_t output_size = 0;
+        NTSTATUS status = SubmitRequestAndWait(CommCommand::REQUEST_PROTECT_MEMORY, target_pid, params, current_offset, nullptr, output_size);
+        if (!NT_SUCCESS(status)) {
+             LogMessageF("[-] ProtectMemory: Failed for address 0x%p, size %zu. Status: 0x%lX", (void*)address, size, status);
+        }
+        return status;
+    }
+
+    NTSTATUS CreateRemoteThread(uint64_t target_pid, uintptr_t start_address, uintptr_t argument, HANDLE* p_thread_id) {
+        if (start_address == 0 || !p_thread_id) {
+            LogMessage("[-] CreateRemoteThread: Invalid start_address or p_thread_id.");
+            if(p_thread_id) *p_thread_id = NULL;
+            return STATUS_INVALID_PARAMETER;
+        }
+        *p_thread_id = NULL; // Initialize output param
+
+        uint8_t params[sizeof(uintptr_t) + sizeof(uintptr_t)];
+        uint32_t current_offset = 0;
+
+        uint64_t p_start_address = static_cast<uint64_t>(start_address);
+        uint64_t p_argument = static_cast<uint64_t>(argument);
+
+        memcpy(params + current_offset, &p_start_address, sizeof(p_start_address));
+        current_offset += sizeof(p_start_address);
+        memcpy(params + current_offset, &p_argument, sizeof(p_argument));
+        current_offset += sizeof(p_argument);
+
+        uint8_t output_buf[sizeof(HANDLE)];
+        uint32_t output_size = sizeof(output_buf);
+
+        NTSTATUS status = SubmitRequestAndWait(CommCommand::REQUEST_CREATE_THREAD, target_pid, params, current_offset, output_buf, output_size);
+
+        if (NT_SUCCESS(status)) {
+            if (output_size == sizeof(HANDLE)) {
+                memcpy(p_thread_id, output_buf, sizeof(HANDLE));
+                LogMessageF("[+] CreateRemoteThread: Successfully created remote thread. TID: %p", *p_thread_id);
+            } else {
+                LogMessageF("[-] CreateRemoteThread: KM success but output_size (%u) != sizeof(HANDLE).", output_size);
+                status = STATUS_UNSUCCESSFUL;
+            }
+        } else {
+            LogMessageF("[-] CreateRemoteThread: Failed for start_address 0x%p. Status: 0x%lX", (void*)start_address, status);
+        }
+        return status;
+    }
+
+    NTSTATUS RequestDriverUnload() {
+        if (!IsInitialized()) {
+            LogMessage("[-] RequestDriverUnload: StealthComm not initialized.");
+            return STATUS_INVALID_DEVICE_STATE;
+        }
+
+        // IOCTL_REQUEST_UNLOAD_DRIVER value from KM's includes.h:
+        // CTL_CODE(FILE_DEVICE_UNKNOWN, 0x902, METHOD_NEITHER, FILE_ANY_ACCESS)
+        // (0x22 << 16) | (0 << 14) | (0x902 << 2) | 3 = 0x22240B
+        const DWORD ctl_unload_driver = 0x0022240B;
+
+        LogMessageF("[+] RequestDriverUnload: Sending unload IOCTL 0x%X to driver handle %p.", ctl_unload_driver, g_h_driver_handle);
+        DWORD bytesReturned = 0;
+        BOOL success = DeviceIoControl(
+            g_h_driver_handle,
+            ctl_unload_driver,
+            nullptr, 0, nullptr, 0,
+            &bytesReturned, nullptr
+        );
+
+        if (!success) {
+            DWORD error_code = GetLastError();
+            LogMessageF("[-] RequestDriverUnload: DeviceIoControl for Unload failed. Win32 Error: %lu", error_code);
+            // Convert Win32 error to NTSTATUS if possible, or return a generic error
+            if (error_code == ERROR_INVALID_HANDLE) return STATUS_INVALID_HANDLE;
+            return STATUS_UNSUCCESSFUL; // Or a more specific mapping
+        }
+
+        LogMessage("[+] RequestDriverUnload: Unload IOCTL sent successfully. Driver should be unloading.");
+        // After successfully sending unload, the handle becomes invalid.
+        // ShutdownStealthComm should be called by the application to clean up other resources.
+        // We mark our handle as invalid here as a best practice.
+        CloseHandle(g_h_driver_handle); // Close it now as it's no longer valid
+        g_h_driver_handle = INVALID_HANDLE_VALUE;
+        g_active_symlink_name.clear(); // Clear related info
+        g_active_ioctl_handshake_code = 0;
+
+        return STATUS_SUCCESS;
     }
 
 } // namespace StealthComm
