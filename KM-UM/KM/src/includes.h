@@ -170,6 +170,19 @@ extern HANDLE g_km_setup_thread_handle;
 // Pointer to the allocated work item
 extern PIO_WORKITEM g_polling_work_item;
 
+// --- START: Definitions for UM->KM Handshake (must match UM's STEALTH_HANDSHAKE_DATA_UM) ---
+// KM side definition for the data received from User Mode during handshake
+#define BEACON_PATTERN_SIZE_KM 16 // Ensure this matches UM's BEACON_PATTERN_SIZE
+
+typedef struct _STEALTH_HANDSHAKE_DATA_KM {
+    PVOID ObfuscatedPtrStruct1HeadUmAddress; // UM VA of the PtrStruct1_UM head
+    UINT64 VerificationToken;                // Token for UM/KM to verify (e.g., dynamic_obfuscation_xor_key)
+    UINT8 BeaconPattern[BEACON_PATTERN_SIZE_KM]; // Beacon pattern from UM to help KM find DynamicSignaturesRelay
+    UINT64 BeaconSalt;                       // Salt for the beacon
+} STEALTH_HANDSHAKE_DATA_KM, *PSTEALTH_HANDSHAKE_DATA_KM;
+// --- END: Definitions for UM->KM Handshake ---
+
+
 // --- START: Shared Communication Structures ---
 // These enums and structs are shared between KM and UM.
 
@@ -210,6 +223,8 @@ struct CommunicationSlot {
     uint64_t result_status_code;
     uint8_t nonce[12];
     uint8_t mac_tag[16]; // Changed from mac to mac_tag to match UM
+    UINT8 KernelPadding1[7]; // Padding
+    UINT8 KernelPadding2[13]; // Padding
 };
 
 struct SharedCommBlock {
@@ -219,6 +234,7 @@ struct SharedCommBlock {
     CommunicationSlot slots[MAX_COMM_SLOTS_KM]; // Use defined constant
     volatile uint64_t honeypot_field;
     volatile ULONG km_fully_initialized_flag; // Added for KM ready signal
+    UINT8 KernelPaddingBlock[11]; // Padding for SharedCommBlock
 };
 #pragma pack(pop)
 
@@ -228,6 +244,29 @@ struct SharedCommBlock {
 // Shared communication related globals (already defined in main.cpp, declared here for access)
 // These are already in main.cpp, ensure they are declared extern if needed across files,
 // but for now, this subtask focuses on main.cpp and includes.h for these specific new declarations.
+
+// Global for storing received beacon salt
+extern UINT64 g_received_beacon_salt_km;
+// Global for the beacon pattern received from UM (potentially to be salted)
+extern UINT8 g_received_beacon_pattern_km[BEACON_PATTERN_SIZE_KM];
+
+// Globals for dynamic IOCTL and device/symlink names
+extern ULONG g_dynamic_handshake_ioctl_code;
+extern WCHAR g_dynamic_device_name_buffer[128];
+extern WCHAR g_dynamic_symlink_name_buffer[128];
+extern UNICODE_STRING g_dynamic_device_name_us;
+extern UNICODE_STRING g_dynamic_symlink_name_us;
+
+// Globals for dynamic driver name
+extern UNICODE_STRING g_dynamic_driver_name_us;
+extern WCHAR g_dynamic_driver_name_buffer[128];
+
+// Globals for dynamic pool tags
+extern ULONG g_pool_tag_devn; // Original: 'DevN'
+extern ULONG g_pool_tag_syml; // Original: 'SymL'
+extern ULONG g_pool_tag_wkit; // Original: 'WkIt'
+extern ULONG g_pool_tag_nmbf; // Original: 'NmBf'
+
 // extern PEPROCESS g_target_process;
 // extern PVOID g_um_shared_comm_block_ptr; // This is a UM VA, KM should not dereference directly without care
 // extern KSPIN_LOCK g_comm_lock;
